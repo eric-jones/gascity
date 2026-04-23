@@ -41,6 +41,11 @@ type agentBuildParams struct {
 	// instead of the legacy SessionNameFor function.
 	beadStore beads.Store
 
+	// rigStores maps rig names to their rig-scoped bead stores.
+	// Used by storeForAgent to create session beads in the correct
+	// rig store instead of the city-level HQ store.
+	rigStores map[string]beads.Store
+
 	// sessionBeads caches the open session-bead snapshot for the current
 	// desired-state build so per-agent resolution does not rescan the store.
 	sessionBeads *sessionBeadSnapshot
@@ -220,6 +225,21 @@ func effectiveOverlayDirs(cityDirs []string, rigDirs map[string][]string, rigNam
 	merged = append(merged, cityDirs...)
 	merged = append(merged, rigSpecific...)
 	return merged
+}
+
+// storeForAgent returns the bead store where session beads for this agent
+// should be created. For rig-scoped agents, returns the rig's store when
+// available; otherwise falls back to the city-level HQ store.
+func (p *agentBuildParams) storeForAgent(cfgAgent *config.Agent) beads.Store {
+	if cfgAgent != nil && len(p.rigStores) > 0 {
+		rigName := configuredRigName(p.cityPath, cfgAgent, p.rigs)
+		if rigName != "" {
+			if rigStore := p.rigStores[rigName]; rigStore != nil {
+				return rigStore
+			}
+		}
+	}
+	return p.beadStore
 }
 
 // templateNameFor returns the configuration template name for an agent.

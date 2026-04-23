@@ -432,3 +432,73 @@ dolt.auto-start: false
 		t.Fatalf("HOME should be passed through to agent env")
 	}
 }
+
+func TestResolveTemplateSetsBeadsPrefixForRigScopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	rigRoot := filepath.Join(cityPath, "enterprise")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigs := []config.Rig{{Name: "enterprise", Path: rigRoot, Prefix: "sc"}}
+	params := &agentBuildParams{
+		city:       &config.City{Workspace: config.Workspace{Provider: "test"}, Rigs: rigs},
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       rigs,
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{
+		Name: "polecat",
+		Dir:  "enterprise",
+	}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_BEADS_PREFIX"]; got != "sc" {
+		t.Fatalf("GC_BEADS_PREFIX = %q, want %q", got, "sc")
+	}
+	if got := tp.Env["GC_RIG"]; got != "enterprise" {
+		t.Fatalf("GC_RIG = %q, want enterprise", got)
+	}
+}
+
+func TestResolveTemplateOmitsBeadsPrefixForCityScopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	params := &agentBuildParams{
+		city:       &config.City{Workspace: config.Workspace{Provider: "test"}},
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{
+		Name: "controller",
+	}
+	tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if got := tp.Env["GC_BEADS_PREFIX"]; got != "" {
+		t.Fatalf("GC_BEADS_PREFIX = %q for city-scoped agent, want empty", got)
+	}
+}

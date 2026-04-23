@@ -8558,3 +8558,140 @@ func TestBuildDesiredState_NamedSessionWorkQueryDoesNotDriveControllerDemand(t *
 		t.Fatal("NamedSessionDemand[alpha/dog] came from controller-side work_query")
 	}
 }
+
+func TestStoreForAgent_ReturnsRigStoreForRigScopedAgent(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	bp := &agentBuildParams{
+		cityPath:  "/city",
+		beadStore: cityStore,
+		rigStores: map[string]beads.Store{"enterprise": rigStore},
+		rigs:      []config.Rig{{Name: "enterprise", Path: "/city/rigs/enterprise"}},
+	}
+	agent := &config.Agent{Name: "polecat", Dir: "enterprise"}
+	got := bp.storeForAgent(agent)
+	if got != rigStore {
+		t.Fatal("storeForAgent returned city store, want rig store for rig-scoped agent")
+	}
+}
+
+func TestStoreForAgent_FallsBackToCityStoreWhenNoRigMatch(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	bp := &agentBuildParams{
+		cityPath:  "/city",
+		beadStore: cityStore,
+		rigStores: map[string]beads.Store{"other": rigStore},
+		rigs:      []config.Rig{{Name: "other", Path: "/city/rigs/other"}},
+	}
+	agent := &config.Agent{Name: "controller"}
+	got := bp.storeForAgent(agent)
+	if got != cityStore {
+		t.Fatal("storeForAgent returned non-city store for city-scoped agent")
+	}
+}
+
+func TestStoreForAgent_FallsBackWhenNoRigStores(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	bp := &agentBuildParams{
+		cityPath:  "/city",
+		beadStore: cityStore,
+	}
+	agent := &config.Agent{Name: "polecat", Dir: "enterprise"}
+	got := bp.storeForAgent(agent)
+	if got != cityStore {
+		t.Fatal("storeForAgent should fall back to city store when rigStores is nil")
+	}
+}
+
+func TestSelectOrCreatePoolSessionBead_CreatesInRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	snapshot := &sessionBeadSnapshot{}
+	cfgAgent := config.Agent{
+		Name:              "polecat",
+		Dir:               "enterprise",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(5),
+	}
+	bp := &agentBuildParams{
+		cityPath:     "/city",
+		beadStore:    cityStore,
+		rigStores:    map[string]beads.Store{"enterprise": rigStore},
+		rigs:         []config.Rig{{Name: "enterprise", Path: "/city/rigs/enterprise"}},
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	bead, _, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "enterprise/polecat", nil, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+
+	if _, err := rigStore.Get(bead.ID); err != nil {
+		t.Fatalf("session bead %s not found in rig store: %v", bead.ID, err)
+	}
+	if _, err := cityStore.Get(bead.ID); err == nil {
+		t.Fatalf("session bead %s should NOT exist in city store", bead.ID)
+	}
+}
+
+func TestSelectOrCreateDependencyPoolSessionBead_CreatesInRigStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	snapshot := &sessionBeadSnapshot{}
+	cfgAgent := config.Agent{
+		Name:              "polecat",
+		Dir:               "enterprise",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(5),
+	}
+	bp := &agentBuildParams{
+		cityPath:     "/city",
+		beadStore:    cityStore,
+		rigStores:    map[string]beads.Store{"enterprise": rigStore},
+		rigs:         []config.Rig{{Name: "enterprise", Path: "/city/rigs/enterprise"}},
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	bead, err := selectOrCreateDependencyPoolSessionBead(bp, &cfgAgent, "enterprise/polecat")
+	if err != nil {
+		t.Fatalf("selectOrCreateDependencyPoolSessionBead: %v", err)
+	}
+
+	if _, err := rigStore.Get(bead.ID); err != nil {
+		t.Fatalf("dep session bead %s not found in rig store: %v", bead.ID, err)
+	}
+	if _, err := cityStore.Get(bead.ID); err == nil {
+		t.Fatalf("dep session bead %s should NOT exist in city store", bead.ID)
+	}
+}
+
+func TestSelectOrCreatePoolSessionBead_CityAgentUsesCityStore(t *testing.T) {
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+	snapshot := &sessionBeadSnapshot{}
+	cfgAgent := config.Agent{
+		Name:              "controller",
+		MinActiveSessions: intPtr(1),
+		MaxActiveSessions: intPtr(5),
+	}
+	bp := &agentBuildParams{
+		cityPath:     "/city",
+		beadStore:    cityStore,
+		rigStores:    map[string]beads.Store{"enterprise": rigStore},
+		rigs:         []config.Rig{{Name: "enterprise", Path: "/city/rigs/enterprise"}},
+		sessionBeads: snapshot,
+		agents:       []config.Agent{cfgAgent},
+	}
+
+	bead, _, err := selectOrCreatePoolSessionBead(bp, &cfgAgent, "controller", nil, map[string]bool{}, map[int]bool{})
+	if err != nil {
+		t.Fatalf("selectOrCreatePoolSessionBead: %v", err)
+	}
+
+	if _, err := cityStore.Get(bead.ID); err != nil {
+		t.Fatalf("session bead %s not found in city store: %v", bead.ID, err)
+	}
+}

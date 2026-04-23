@@ -284,6 +284,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_RIG_ROOT"] = rigRoot
 		agentEnv["BEADS_DIR"] = filepath.Join(rigRoot, ".beads")
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
+		if p.city != nil {
+			if rig, ok := rigByName(p.city, rigName); ok {
+				agentEnv["GC_BEADS_PREFIX"] = rig.EffectivePrefix()
+			}
+		}
 	}
 
 	// Step 9: Render prompt with beacon.
