@@ -503,6 +503,7 @@ func (s *Server) doStreamAgentOutput(hctx huma.Context, name string, send sse.Se
 	if !state.running {
 		hctx.SetHeader("GC-Agent-Status", "stopped")
 	}
+	flushSSEHeaders(hctx)
 	ctx := hctx.Context()
 	workerOps := s.watchAgentWorkerOperationSignals(ctx, state.name, state.cfg)
 	if state.logPath != "" {
