@@ -36,9 +36,13 @@ if is_running; then
     host="127.0.0.1"
   fi
   args="--host $host --port $GC_DOLT_PORT --user $GC_DOLT_USER --no-tls"
-  if [ -n "$GC_DOLT_PASSWORD" ]; then
-    export DOLT_CLI_PASSWORD="$GC_DOLT_PASSWORD"
-  fi
+  # Always export DOLT_CLI_PASSWORD so dolt does not prompt interactively.
+  # Non-TTY contexts (agent sessions) cannot answer the prompt and fail with
+  # "Failed to parse credentials: operation not supported by device". Empty
+  # is correct because the managed Dolt server runs without auth. An
+  # externally-set DOLT_CLI_PASSWORD is preserved.
+  : "${DOLT_CLI_PASSWORD=${GC_DOLT_PASSWORD-}}"
+  export DOLT_CLI_PASSWORD
   exec dolt $args sql "$@"
 else
   # Embedded mode — find first database directory.
