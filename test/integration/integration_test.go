@@ -1401,6 +1401,9 @@ func TestUsesStandaloneBDWorkspaceKeepsFileProviderOnShim(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: test\n"), 0o644); err != nil {
 		t.Fatalf("write config.yaml: %v", err)
 	}
+	if usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=file"}) {
+		t.Fatal("file provider city with config.yaml should keep using the file-store bd shim")
+	}
 	if !usesStandaloneBDWorkspace(dir, []string{"GC_BEADS=dolt"}) {
 		t.Fatal("standalone .beads workspace with config.yaml should use the standalone bd env")
 	}
