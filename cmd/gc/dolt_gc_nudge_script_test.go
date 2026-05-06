@@ -598,10 +598,10 @@ func TestDoltGCNudgeSkipsExternalRigDatabaseWithoutLocalData(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("dolt argv lines = %d, want 1 for local managed db only:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(lines[0], "--use-db testdb") {
+	if !strings.Contains(lines[0], "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want local managed testdb", lines[0])
 	}
-	if strings.Contains(argv, "--use-db extdb") {
+	if strings.Contains(argv, "USE `extdb`") {
 		t.Fatalf("dolt argv should not target external rig db:\n%s", argv)
 	}
 }
@@ -635,7 +635,7 @@ func TestDoltGCNudgeDefaultsMissingDatabaseMetadataToBeads(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--use-db beads") {
+	if !strings.Contains(argv, "USE `beads`") {
 		t.Fatalf("dolt argv = %q, want default beads database", argv)
 	}
 }
@@ -674,10 +674,10 @@ func TestDoltGCNudgeSkipsInvalidDatabaseMetadata(t *testing.T) {
 	if len(lines) != 1 {
 		t.Fatalf("dolt argv lines = %d, want 1 valid database:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(lines[0], "--use-db testdb") {
+	if !strings.Contains(lines[0], "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want local managed testdb", lines[0])
 	}
-	if strings.Contains(argv, "--use-db --help") {
+	if strings.Contains(argv, "USE `--help`") {
 		t.Fatalf("dolt argv should not target invalid database:\n%s", argv)
 	}
 }
@@ -715,10 +715,10 @@ func TestDoltGCNudgeSkipsSystemDatabaseMetadata(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if strings.Contains(argv, "--use-db mysql") {
+	if strings.Contains(argv, "USE `mysql`") {
 		t.Fatalf("dolt argv should not target system database:\n%s", argv)
 	}
-	if !strings.Contains(argv, "--use-db testdb") {
+	if !strings.Contains(argv, "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want valid testdb", argv)
 	}
 }
@@ -752,7 +752,7 @@ func TestDoltGCNudgeAllowsHyphenatedDatabaseMetadata(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--use-db frontend-db") {
+	if !strings.Contains(argv, "USE `frontend-db`") {
 		t.Fatalf("dolt argv = %q, want hyphenated database", argv)
 	}
 }
@@ -791,7 +791,7 @@ func TestDoltGCNudgeHonorsDataDirOverride(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--use-db testdb") {
+	if !strings.Contains(argv, "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want override-backed testdb", argv)
 	}
 }
@@ -822,7 +822,7 @@ func TestDoltGCNudgeDiscoversOrphanDatabaseDirs(t *testing.T) {
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--use-db orphan-db") {
+	if !strings.Contains(argv, "USE `orphan-db`") {
 		t.Fatalf("dolt argv = %q, want orphan database", argv)
 	}
 }
@@ -874,7 +874,7 @@ func TestDoltGCNudgeAggregateThresholdTriggersSubthresholdDatabases(t *testing.T
 	}
 
 	argv := strings.TrimSpace(readFileString(t, argvCapture))
-	if !strings.Contains(argv, "--use-db testdb") || !strings.Contains(argv, "--use-db rigdb") {
+	if !strings.Contains(argv, "USE `testdb`") || !strings.Contains(argv, "USE `rigdb`") {
 		t.Fatalf("dolt argv = %q, want both subthreshold databases under aggregate trigger", argv)
 	}
 }
@@ -916,10 +916,10 @@ func TestDoltGCNudgeFallbackFindsLocalRigOutsideRigsDir(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("dolt argv lines = %d, want 2 databases from fallback scan:\n%s", len(lines), argv)
 	}
-	if !strings.Contains(argv, "--use-db testdb") {
+	if !strings.Contains(argv, "USE `testdb`") {
 		t.Fatalf("dolt argv = %q, want city database", argv)
 	}
-	if !strings.Contains(argv, "--use-db frontenddb") {
+	if !strings.Contains(argv, "USE `frontenddb`") {
 		t.Fatalf("dolt argv = %q, want rig database outside rigs/ dir", argv)
 	}
 }
@@ -945,7 +945,7 @@ func TestDoltGCNudgeWarnsWhenRigListFailsBeforeFallback(t *testing.T) {
 	if !strings.Contains(string(out), "gc rig list failed rc=7") {
 		t.Fatalf("gc-nudge output = %q, want rig-list failure warning", out)
 	}
-	if !strings.Contains(readFileString(t, argvCapture), "--use-db testdb") {
+	if !strings.Contains(readFileString(t, argvCapture), "USE `testdb`") {
 		t.Fatalf("gc-nudge did not fall back to local metadata scan; output:\n%s", out)
 	}
 }
