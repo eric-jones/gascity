@@ -103,10 +103,10 @@ response is always the same:
 
 1. **File a warrant bead:**
 ```bash
-gc bd create --type=warrant \
+gc bd create --type=task \
   --title="Stuck: <agent>" \
   --metadata '{"target":"<session>","reason":"<reason>","requester":"deacon"}' \
-  --label=pool:dog
+  --label=warrant,pool:dog
 ```
 
 2. The dog pool picks up the warrant and runs `mol-shutdown-dance`
@@ -163,7 +163,7 @@ Individual stuck agents don't need escalation — the warrant system handles the
 | List convoys | `gc convoy list` |
 | Find cross-rig deps | `gc bd dep list <id> --direction=up --type=blocks --json` |
 | Convert dep type | `gc bd dep remove <id> <dep>` then `gc bd dep add <id> <dep> --type=related` |
-| File stuck-agent warrant | `gc bd create --type=warrant --label=pool:dog --metadata '{...}'` |
+| File stuck-agent warrant | `gc bd create --type=task --label=warrant,pool:dog --metadata '{...}'` |
 | Run system diagnostics | `gc doctor` |
 | Compact wisps (dry run) | `gc bd mol wisp gc --age 24h --dry-run` |
 | Compact wisps | `gc bd mol wisp gc --age 24h` |
