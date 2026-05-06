@@ -105,6 +105,13 @@ func (f *Factory) SessionByID(id string) (Handle, error) {
 	return f.sessionFromInfoAndBead(info, bead)
 }
 
+// SessionByLoadedBead is like SessionByID but uses an already-loaded bead,
+// avoiding a redundant store.Get for callers that just resolved it (e.g.
+// via session.ResolveSessionBeadByExactID).
+func (f *Factory) SessionByLoadedBead(bead beads.Bead) (Handle, error) {
+	return f.sessionFromInfoAndBead(f.manager.SessionInfoFromBead(bead), bead)
+}
+
 func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) (Handle, error) {
 	spec := SessionSpec{
 		ID:       info.ID,

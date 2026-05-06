@@ -1154,6 +1154,13 @@ func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
 	return m.infoFromBead(b), b, nil
 }
 
+// SessionInfoFromBead converts an already-loaded session bead to Info,
+// applying the same enrichment as Get. Callers that have just resolved
+// the bead can use this to avoid a second store.Get.
+func (m *Manager) SessionInfoFromBead(b beads.Bead) Info {
+	return m.infoFromBead(b)
+}
+
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
 // has already been loaded by the caller, avoiding a redundant store fetch.
 func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) RuntimeObservation {
