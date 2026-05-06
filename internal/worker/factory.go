@@ -98,13 +98,16 @@ func (f *Factory) Session(spec SessionSpec) (*SessionHandle, error) {
 // SessionByID rebuilds a session-backed worker handle from persisted session
 // metadata and the factory's optional resolved-runtime hook.
 func (f *Factory) SessionByID(id string) (Handle, error) {
-	info, err := f.manager.Get(id)
+	info, bead, err := f.manager.GetWithBead(id)
 	if err != nil {
 		return nil, err
 	}
+	return f.sessionFromInfoAndBead(info, bead)
+}
 
+func (f *Factory) sessionFromInfoAndBead(info sessionpkg.Info, bead beads.Bead) (Handle, error) {
 	spec := SessionSpec{
-		ID:       id,
+		ID:       info.ID,
 		Template: info.Template,
 		Title:    info.Title,
 		Alias:    info.Alias,
@@ -117,17 +120,11 @@ func (f *Factory) SessionByID(id string) (Handle, error) {
 			ResumeCommand: info.ResumeCommand,
 		},
 	}
-	sessionKind := ""
-	var metadata map[string]string
-	if f.store != nil {
-		if bead, beadErr := f.store.Get(id); beadErr == nil {
-			sessionKind = strings.TrimSpace(bead.Metadata["real_world_app_session_kind"])
-			if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
-				spec.Profile = Profile(profile)
-			}
-			metadata = cloneStringMap(bead.Metadata)
-		}
+	sessionKind := strings.TrimSpace(bead.Metadata["real_world_app_session_kind"])
+	if profile := strings.TrimSpace(bead.Metadata["worker_profile"]); profile != "" {
+		spec.Profile = Profile(profile)
 	}
+	metadata := cloneStringMap(bead.Metadata)
 	if f.resolveSessionRuntime != nil {
 		resolved, err := f.resolveSessionRuntime(info, sessionKind, metadata)
 		if err != nil {

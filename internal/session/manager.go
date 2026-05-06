@@ -1139,11 +1139,19 @@ func (m *Manager) PruneDetailed(before time.Time) (PruneResult, error) {
 
 // Get returns info about a single session.
 func (m *Manager) Get(id string) (Info, error) {
+	info, _, err := m.GetWithBead(id)
+	return info, err
+}
+
+// GetWithBead returns session info and the underlying bead in a single
+// store fetch, for callers that need both views (e.g. spec build plus
+// metadata lookup) without a redundant store.Get.
+func (m *Manager) GetWithBead(id string) (Info, beads.Bead, error) {
 	b, _, err := m.loadSessionBead(id, true)
 	if err != nil {
-		return Info{}, err
+		return Info{}, beads.Bead{}, err
 	}
-	return m.infoFromBead(b), nil
+	return m.infoFromBead(b), b, nil
 }
 
 // ObserveRuntimeForInfo reports live provider state for a session whose Info
