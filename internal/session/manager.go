@@ -1146,26 +1146,23 @@ func (m *Manager) Get(id string) (Info, error) {
 	return m.infoFromBead(b), nil
 }
 
-// ObserveRuntime reports live provider state for the current session runtime.
-func (m *Manager) ObserveRuntime(id string, processNames []string) (RuntimeObservation, error) {
-	info, err := m.Get(id)
-	if err != nil {
-		return RuntimeObservation{}, err
-	}
+// ObserveRuntimeForInfo reports live provider state for a session whose Info
+// has already been loaded by the caller, avoiding a redundant store fetch.
+func (m *Manager) ObserveRuntimeForInfo(info Info, processNames []string) RuntimeObservation {
 	obs := RuntimeObservation{SessionName: info.SessionName}
 	if strings.TrimSpace(info.SessionName) == "" || m.sp == nil {
-		return obs, nil
+		return obs
 	}
 	obs.Running = m.sp.IsRunning(info.SessionName)
 	if !obs.Running {
-		return obs, nil
+		return obs
 	}
 	obs.Alive = m.sp.ProcessAlive(info.SessionName, processNames)
 	obs.Attached = m.sp.IsAttached(info.SessionName)
 	if lastActive, err := m.sp.GetLastActivity(info.SessionName); err == nil {
 		obs.LastActive = lastActive
 	}
-	return obs, nil
+	return obs
 }
 
 // ListResult holds the results of a ListFull call, including the raw beads
