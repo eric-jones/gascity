@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2788,7 +2789,7 @@ func buildOrderDispatcherFromListExec(aa []orders.Order, store beads.Store, ep e
 		ep:             ep,
 		execRun:        execRun,
 		rec:            rec,
-		stderr:         &bytes.Buffer{},
+		stderr:         lockedStderr(&bytes.Buffer{}),
 		cfg:            cfg,
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: dispatchCancel,
@@ -4226,5 +4227,55 @@ func TestOrderDispatcherCancelTerminatesInFlight(t *testing.T) {
 	case <-drainDone:
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("drain did not return promptly after cancel()")
+	}
+}
+
+// lockedWriter must serialize concurrent Write calls so log lines emitted
+// from parallel dispatchOne goroutines do not interleave. Run under -race
+// to also catch the underlying data race on the shared writer.
+func TestLockedWriterSerializesConcurrentWrites(t *testing.T) {
+	var buf bytes.Buffer
+	lw := &lockedWriter{w: &buf}
+	const goroutines = 16
+	const writesPerG = 100
+	line := []byte("dispatch err line\n")
+
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < writesPerG; j++ {
+				if _, err := lw.Write(line); err != nil {
+					t.Errorf("Write: %v", err)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	wantBytes := goroutines * writesPerG * len(line)
+	if got := buf.Len(); got != wantBytes {
+		t.Fatalf("buffer length: got %d, want %d (suggests torn or lost writes)", got, wantBytes)
+	}
+	wantLine := bytes.TrimRight(line, "\n")
+	for i, l := range bytes.Split(bytes.TrimRight(buf.Bytes(), "\n"), []byte{'\n'}) {
+		if !bytes.Equal(l, wantLine) {
+			t.Fatalf("line %d: got %q, want %q (interleaved bytes)", i, l, wantLine)
+		}
+	}
+}
+
+func TestLockedStderrPreservesNil(t *testing.T) {
+	if got := lockedStderr(nil); got != nil {
+		t.Fatalf("lockedStderr(nil): got %v, want nil", got)
+	}
+}
+
+func TestLockedStderrWrapsNonNil(t *testing.T) {
+	var buf bytes.Buffer
+	w := lockedStderr(&buf)
+	if _, ok := w.(*lockedWriter); !ok {
+		t.Fatalf("lockedStderr(non-nil): got %T, want *lockedWriter", w)
 	}
 }

@@ -82,6 +82,28 @@ func logDispatchError(stderr io.Writer, format string, args ...any) {
 	}
 }
 
+// lockedWriter serializes Write calls so concurrent dispatchOne goroutines
+// logging via logDispatchError(m.stderr, ...) do not interleave bytes.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (lw *lockedWriter) Write(p []byte) (int, error) {
+	lw.mu.Lock()
+	defer lw.mu.Unlock()
+	return lw.w.Write(p)
+}
+
+// lockedStderr wraps w for storage on memoryOrderDispatcher.stderr. Returns
+// nil unchanged so logDispatchError's nil-guard keeps its original semantics.
+func lockedStderr(w io.Writer) io.Writer {
+	if w == nil {
+		return nil
+	}
+	return &lockedWriter{w: w}
+}
+
 type orderStoreFunc func(execStoreTarget) (beads.Store, error)
 
 // memoryOrderDispatcher is the production implementation.
@@ -160,7 +182,7 @@ func buildOrderDispatcher(cityPath string, cfg *config.City, rec events.Recorder
 		ep:             ep,
 		execRun:        shellExecRunner,
 		rec:            rec,
-		stderr:         stderr,
+		stderr:         lockedStderr(stderr),
 		maxTimeout:     cfg.Orders.MaxTimeoutDuration(),
 		cfg:            cfg,
 		cityName:       loadedCityName(cfg, cityPath),
