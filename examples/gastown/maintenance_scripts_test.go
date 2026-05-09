@@ -4549,8 +4549,8 @@ func TestJsonlExportPushFailureRecoversFromMalformedState(t *testing.T) {
 	if err := json.Unmarshal(stateData, &state); err != nil {
 		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
 	}
-	if got := state["consecutive_push_failures"]; got != float64(1) {
-		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
 	}
 }
 
@@ -4583,8 +4583,46 @@ func TestJsonlExportPushFailureRecoversFromWrongShapeState(t *testing.T) {
 	if err := json.Unmarshal(stateData, &state); err != nil {
 		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
 	}
-	if got := state["consecutive_push_failures"]; got != float64(1) {
-		t.Fatalf("consecutive_push_failures = %v, want 1\nstate: %s", got, stateData)
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0\nstate: %s", got, stateData)
+	}
+}
+
+func TestJsonlExportSkipsPushWhenNoOriginRemoteAndResetsCounter(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	stateDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	mailLog := filepath.Join(t.TempDir(), "gc-mail.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	stateFile := filepath.Join(stateDir, "jsonl-export-state.json")
+
+	initSeedArchive(t, archiveRepo, 3)
+	writeMultiRecordDoltStub(t, binDir, 5)
+	writeJsonlExportGCStub(t, binDir)
+
+	initial := `{"consecutive_push_failures":2,"pending_archive_push":true}`
+	if err := os.WriteFile(stateFile, []byte(initial+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(state file): %v", err)
+	}
+
+	env := jsonlExportEnv(t, cityDir, binDir, stateDir, archiveRepo, gcLog, mailLog)
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "jsonl-export.sh"), env)
+
+	stateData, err := os.ReadFile(stateFile)
+	if err != nil {
+		t.Fatalf("ReadFile(state file): %v", err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(stateData, &state); err != nil {
+		t.Fatalf("Unmarshal(state file): %v\n%s", err, stateData)
+	}
+	if got := state["consecutive_push_failures"]; got != float64(0) {
+		t.Fatalf("consecutive_push_failures = %v, want 0 (no-origin skip resets counter)\nstate: %s", got, stateData)
+	}
+	if _, ok := state["pending_archive_push"]; ok {
+		t.Fatalf("pending_archive_push should be cleared when origin is missing\nstate: %s", stateData)
 	}
 }
 

@@ -317,6 +317,13 @@ retry_pending_spike_alert() {
 push_archive_main() {
     local consecutive
 
+    if ! git remote get-url origin >/dev/null 2>&1; then
+        echo "jsonl-export: no origin remote configured; skipping push" >&2
+        set_consecutive_push_failures "0"
+        clear_pending_archive_push
+        return 0
+    fi
+
     record_archive_push_failure() {
         local message="$1"
 
