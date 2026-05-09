@@ -346,7 +346,7 @@ func TestOrderDispatchRejectsAmbiguousPackPool(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	if !rec.hasType(events.OrderFailed) {
 		t.Fatal("missing order.failed event for ambiguous pool")
@@ -382,7 +382,7 @@ func TestOrderDispatchRejectsAmbiguousPackPool(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now().Add(10*time.Second))
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	all = trackingBeads(t, store, "order-run:mol-dog-doctor")
 	if len(all) != 1 {
@@ -440,7 +440,7 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now())
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	all := trackingBeads(t, store, "order-run:release-watch")
 	if len(all) != 1 {
@@ -464,7 +464,7 @@ func TestOrderDispatchRejectsAmbiguousEventPoolOncePerEvent(t *testing.T) {
 	}
 
 	m.dispatch(context.Background(), t.TempDir(), time.Now().Add(10*time.Second))
-	time.Sleep(50 * time.Millisecond)
+	m.drain(context.Background())
 
 	all = trackingBeads(t, store, "order-run:release-watch")
 	if len(all) != 1 {
@@ -4036,15 +4036,22 @@ func loadImportedDogOrders(t *testing.T, cityDir string) (*config.City, []orders
 }
 
 // memRecorder records events in memory for test assertions.
+// mu guards events against concurrent Record/hasType/hasSubject calls from
+// dispatchOne goroutines and the test goroutine.
 type memRecorder struct {
+	mu     sync.Mutex
 	events []events.Event
 }
 
 func (r *memRecorder) Record(e events.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.events = append(r.events, e)
 }
 
 func (r *memRecorder) hasType(typ string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, e := range r.events {
 		if e.Type == typ {
 			return true
@@ -4054,6 +4061,8 @@ func (r *memRecorder) hasType(typ string) bool {
 }
 
 func (r *memRecorder) hasSubject(subject string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	for _, e := range r.events {
 		if e.Subject == subject {
 			return true
