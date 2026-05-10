@@ -278,6 +278,18 @@ REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
 gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
 gc session wake "$REFINERY_TARGET" || true
 gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
+
+# Release this slot: branch is pushed and the bead is reassigned, so refinery
+# owns the work from here. Without removing the local branch and worktree,
+# every polecat session leaves the pool slot pinned to a dead branch — the
+# next dispatch sees the slot as occupied and stalls (or never spawns the
+# polecat at all under fan-out).
+WORKTREE_PATH=$(pwd)
+BRANCH=$(git branch --show-current)
+cd "$GC_RIG_ROOT"
+[ -n "$BRANCH" ] && git branch -D "$BRANCH" 2>/dev/null
+git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
+
 gc runtime drain-ack
 exit
 ```
@@ -286,6 +298,13 @@ Your work is not complete until you run these commands. `gc runtime drain-ack`
 signals the reconciler to kill this session — it will only restart you if the
 pool check command finds more work. Sitting idle after finishing implementation
 is the "Idle Polecat heresy."
+
+The `git branch -D` + `git worktree remove` step matters under fan-out: pool
+slots are bounded, and a stale worktree pinned to a dead branch counts as
+"occupied" to the reconciler. Skipping cleanup means the next sling routed to
+this rig either reuses a stale workspace (subtle) or never gets a polecat at
+all (visible). Run cleanup BEFORE `gc runtime drain-ack` so the session is
+still alive while git operations execute.
 
 ---
 
