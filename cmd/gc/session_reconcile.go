@@ -1105,7 +1105,7 @@ var knownSessionStates = map[string]bool{
 	"quarantined":                        true,
 	"creating":                           true,
 	"drained":                            true,
-	string(sessionpkg.StateFailedCreate): true, // Status=open + failed-create releases the alias
+	string(sessionpkg.StateFailedCreate): true, // processed so skip/orphan-close can release the slot
 	"":                                   true, // empty state is valid (legacy beads)
 }
 

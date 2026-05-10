@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // testStore wraps a bead slice for SetMetadata tracking in tests.
@@ -1965,7 +1966,7 @@ func TestFindAgentByTemplate(t *testing.T) {
 func TestIsKnownState_KnownStates(t *testing.T) {
 	known := []string{
 		"active", "asleep", "awake", "stopped", "suspended",
-		"orphaned", "closed", "quarantined", "creating", "failed-create", "",
+		"orphaned", "closed", "quarantined", "creating", string(sessionpkg.StateFailedCreate), "",
 	}
 	for _, state := range known {
 		session := makeBead("b1", map[string]string{"state": state})
@@ -2008,13 +2009,10 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 	}
 }
 
-// TestReconcileSessionBeads_FailedCreateSlotUnblocked verifies that a pool
-// slot stuck with state=failed-create (mid-rollback write failure) is not
-// silently skipped by the reconciler. Before the fix, failed-create was not
-// in knownSessionStates so the reconciler logged "unknown state" and left the
-// slot blocked indefinitely. After the fix the slot is processed, healed, and
-// a fresh session is started.
-func TestReconcileSessionBeads_FailedCreateSlotUnblocked(t *testing.T) {
+// TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted verifies that
+// state=failed-create cannot reach the provider start path even if a stale
+// desired-state entry points at that session_name.
+func TestReconcileSessionBeads_FailedCreateDesiredTargetNotStarted(t *testing.T) {
 	env := newReconcilerTestEnv()
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
 	env.addDesired("worker", "worker", false)
@@ -2028,17 +2026,17 @@ func TestReconcileSessionBeads_FailedCreateSlotUnblocked(t *testing.T) {
 	// the reconciler processes it.
 	session := env.createSessionBead("worker", "worker")
 	env.setSessionMetadata(&session, map[string]string{
-		"state":                "failed-create",
+		"state":                string(sessionpkg.StateFailedCreate),
 		"pending_create_claim": "true",
 	})
 
 	woken := env.reconcile([]beads.Bead{session})
 
-	if woken != 1 {
-		t.Errorf("expected reconciler to unblock failed-create slot and start a session, got woken=%d", woken)
+	if woken != 0 {
+		t.Errorf("expected failed-create desired target not to start, got woken=%d", woken)
 	}
-	if !env.sp.IsRunning("worker") {
-		t.Error("expected session to be started via Provider after failed-create slot is unblocked")
+	if env.sp.IsRunning("worker") {
+		t.Error("failed-create session was started via Provider")
 	}
 }
 

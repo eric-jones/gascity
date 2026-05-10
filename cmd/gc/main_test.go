@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/rogpeppe/go-internal/testscript"
 )
 
@@ -1807,6 +1808,55 @@ func TestLookupPoolSessionNames_PrefersActiveStampedBeadOverCreatingScoreTie(t *
 	}
 	if got["frontend/worker-5"] != "z-active-worker-5" {
 		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want active stamped bead to beat creating duplicate", got)
+	}
+}
+
+func TestLookupPoolSessionNames_IgnoresFailedCreateIdentity(t *testing.T) {
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MaxActiveSessions: intPtr(5)},
+		},
+	}
+	cfgAgent := &cfg.Agents[0]
+	for _, bead := range []beads.Bead{
+		{
+			Title:  "failed create worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "stale-worker-1",
+				"agent_name":   "frontend/worker-1",
+				"alias":        "frontend/worker-1",
+				"pool_slot":    "1",
+				"state":        string(sessionpkg.StateFailedCreate),
+			},
+		},
+		{
+			Title:  "fresh worker",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"template":     "frontend/worker",
+				"session_name": "fresh-worker-1",
+				"agent_name":   "frontend/worker-1",
+				"pool_slot":    "1",
+				"state":        "creating",
+			},
+		},
+	} {
+		if _, err := store.Create(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := lookupPoolSessionNames(store, cfg, cfgAgent)
+	if err != nil {
+		t.Fatalf("lookupPoolSessionNames: %v", err)
+	}
+	if got["frontend/worker-1"] != "fresh-worker-1" {
+		t.Fatalf("lookupPoolSessionNames(frontend/worker) = %#v, want failed-create identity ignored", got)
 	}
 }
 

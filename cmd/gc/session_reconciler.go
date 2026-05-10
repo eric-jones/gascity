@@ -1390,6 +1390,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 		if shouldWake && !target.alive {
 			// Session should be awake but isn't — wake it.
+			if isFailedCreateSessionBead(*target.session) {
+				if trace != nil {
+					trace.recordDecision("reconciler.session.wake", target.tp.TemplateName, name, "wake", "failed_create", traceRecordPayload{
+						"pending_create_claim": strings.TrimSpace(target.session.Metadata["pending_create_claim"]),
+					}, nil, "")
+				}
+				continue
+			}
 			if sessionIsQuarantined(*target.session, clk) {
 				continue // crash-loop protection
 			}
