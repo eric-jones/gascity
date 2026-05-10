@@ -370,6 +370,37 @@ func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
 	}
 }
 
+// TestRefineryPromptMergeBookkeepingBindsMetadataToClose guards against
+// the regression observed in L5c v4 (2026-05-10): the refinery agent
+// merged a polecat branch (fast-forward) on a no-remote rig, then ran
+// only `gc bd close $WORK --reason "Merged to main at 055fa36..."` —
+// no `gc bd update --set-metadata merged_sha=...` ran. The closed bead
+// had `merged_sha=null` and `merged_target=null`, so downstream tools
+// could not tell the bead actually merged. The agent had also bypassed
+// the formula's `git update-ref` flow in favor of `git checkout
+// $TARGET; git merge --ff-only temp` from a worktree.
+//
+// The fix adds a "Merge Bookkeeping" section to the refinery prompt
+// that names both obligations: metadata-write before close (regardless
+// of remote / FF / merge-commit shape), and `git update-ref` over
+// `git checkout + merge --ff-only`.
+func TestRefineryPromptMergeBookkeepingBindsMetadataToClose(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## Merge Bookkeeping",
+		"`merged_sha` and `merged_target` MUST be written via",
+		"`gc bd update --set-metadata` BEFORE `gc bd close`",
+		"`git update-ref refs/heads/$TARGET <sha>`",
+	)
+}
+
 func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
