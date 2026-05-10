@@ -1965,7 +1965,7 @@ func TestFindAgentByTemplate(t *testing.T) {
 func TestIsKnownState_KnownStates(t *testing.T) {
 	known := []string{
 		"active", "asleep", "awake", "stopped", "suspended",
-		"orphaned", "closed", "quarantined", "creating", "",
+		"orphaned", "closed", "quarantined", "creating", "failed-create", "",
 	}
 	for _, state := range known {
 		session := makeBead("b1", map[string]string{"state": state})
@@ -2005,6 +2005,40 @@ func TestForwardCompatibility_UnknownState(t *testing.T) {
 	// The warning should appear in stderr.
 	if !strings.Contains(env.stderr.String(), "unknown state") {
 		t.Errorf("expected warning about unknown state in stderr, got: %s", env.stderr.String())
+	}
+}
+
+// TestReconcileSessionBeads_FailedCreateSlotUnblocked verifies that a pool
+// slot stuck with state=failed-create (mid-rollback write failure) is not
+// silently skipped by the reconciler. Before the fix, failed-create was not
+// in knownSessionStates so the reconciler logged "unknown state" and left the
+// slot blocked indefinitely. After the fix the slot is processed, healed, and
+// a fresh session is started.
+func TestReconcileSessionBeads_FailedCreateSlotUnblocked(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", false)
+
+	// Simulate the mid-rollback failure: rollbackPendingCreate writes
+	// state=failed-create via ClosePatch, then tries to set Status=closed.
+	// If that Status write fails the bead is left with Status=open,
+	// state=failed-create, and pending_create_claim still "true" — ClosePatch
+	// does not clear pending_create_claim, and clearPendingStartInFlightLease
+	// only clears last_woke_at. The combination blocks the pool slot until
+	// the reconciler processes it.
+	session := env.createSessionBead("worker", "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "failed-create",
+		"pending_create_claim": "true",
+	})
+
+	woken := env.reconcile([]beads.Bead{session})
+
+	if woken != 1 {
+		t.Errorf("expected reconciler to unblock failed-create slot and start a session, got woken=%d", woken)
+	}
+	if !env.sp.IsRunning("worker") {
+		t.Error("expected session to be started via Provider after failed-create slot is unblocked")
 	}
 }
 

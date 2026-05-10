@@ -5994,6 +5994,110 @@ func TestDrainedIsKnownState(t *testing.T) {
 	}
 }
 
+func TestFailedCreateIsKnownState(t *testing.T) {
+	if !knownSessionStates["failed-create"] {
+		t.Fatal("failed-create must be a known session state")
+	}
+}
+
+// TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot is §5-T1:
+// a pool session bead whose close call failed mid-rollback (Status=open,
+// state=failed-create) must be recognized as a known state and closed by the
+// reconciler within one pass so the freed slot can be filled by a fresh session.
+func TestReconcileSessionBeads_ClosesOrphanedFailedCreateAndFreesSlot(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 1, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "polecat", StartCommand: "true", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
+		},
+	}
+
+	// Simulate a mid-rollback failure: metadata was written (state=failed-create,
+	// pending_create_claim cleared) but store.Close failed, leaving Status=open.
+	failedBead, err := store.Create(beads.Bead{
+		Title:  "polecat-1",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:polecat-1"},
+		Metadata: map[string]string{
+			"session_name":         "polecat-1",
+			"agent_name":           "polecat-1",
+			"template":             "polecat",
+			"state":                "failed-create",
+			"pool_slot":            "1",
+			poolManagedMetadataKey: boolMetadata(true),
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":           "1",
+			"instance_token":       "failed-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create failed-create bead: %v", err)
+	}
+
+	// Fresh pool session bead: what buildDesiredState allocates for the pending demand.
+	freshBead, err := store.Create(beads.Bead{
+		Title:  "polecat-2",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:polecat-2"},
+		Metadata: map[string]string{
+			"session_name":         "polecat-2",
+			"agent_name":           "polecat-2",
+			"template":             "polecat",
+			"state":                "creating",
+			"pool_slot":            "2",
+			"pending_create_claim": boolMetadata(true),
+			poolManagedMetadataKey: boolMetadata(true),
+			"live_hash":            runtime.LiveFingerprint(runtime.Config{Command: "true"}),
+			"generation":           "1",
+			"instance_token":       "new-token",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create fresh bead: %v", err)
+	}
+
+	// desired: only the fresh bead; the failed-create bead is not desired.
+	ds := map[string]TemplateParams{
+		"polecat-2": {
+			TemplateName: "polecat",
+			InstanceName: "polecat-2",
+			Command:      "true",
+			PoolSlot:     2,
+		},
+	}
+
+	sessions, _ := loadSessionBeads(store)
+	cfgNames := configuredSessionNames(cfg, "", store)
+	poolDesired := map[string]int{"polecat": 1}
+	var stdout, stderr bytes.Buffer
+	woken := reconcileSessionBeads(
+		context.Background(), sessions, ds, cfgNames,
+		cfg, sp, store, nil, nil, nil, newDrainTracker(), poolDesired, false, nil, "test-city",
+		nil, clk, events.Discard, 0, 0, &stdout, &stderr,
+	)
+
+	// The failed-create bead must be closed, not silently skipped as unknown state.
+	got, err := store.Get(failedBead.ID)
+	if err != nil {
+		t.Fatalf("Get failed-create bead: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("failed-create bead status = %q, want closed", got.Status)
+	}
+	if strings.Contains(stderr.String(), "unknown state") {
+		t.Errorf("reconciler logged unknown state for failed-create bead: %s", stderr.String())
+	}
+
+	// A fresh session must be started in the freed slot.
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 (fresh pool session should be started)", woken)
+	}
+	_ = freshBead
+}
+
 // TODO(pool-consolidation): This test validates that poolDesired gates wake
 // decisions. Needs updating when pool_slot is removed — the slot-based gate
 // will be replaced with count-based ordering.
