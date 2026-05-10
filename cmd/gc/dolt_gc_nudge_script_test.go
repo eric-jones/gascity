@@ -1117,3 +1117,44 @@ func waitForFile(t *testing.T, path string) {
 	}
 	t.Fatalf("timed out waiting for %s", path)
 }
+
+// TestDoltGCNudgeCliSurfaceIsValid validates that the global flags and subcommand
+// used in the gc-nudge dolt invocation still exist in the real dolt binary.
+// The gc-nudge stub tests capture argv shape but cannot catch flag renames or
+// removals. This test provides a cheap compile-time guard: it skips if dolt is
+// not installed and only queries --help output (no server required).
+func TestDoltGCNudgeCliSurfaceIsValid(t *testing.T) {
+	doltBin, err := exec.LookPath("dolt")
+	if err != nil {
+		t.Skip("dolt not installed; skipping CLI surface check")
+	}
+
+	// gc-nudge invocation (examples/dolt/commands/gc-nudge/run.sh):
+	//   dolt --host <h> --port <p> --user <u> --no-tls --use-db <db> sql -q "CALL DOLT_GC()"
+	// Validate: global flags exist in `dolt --help` and sql subcommand is listed.
+	globalHelp, err := exec.Command(doltBin, "--help").CombinedOutput()
+	if err != nil {
+		// dolt --help exits 1 on some versions even on success; check output length.
+		if len(globalHelp) == 0 {
+			t.Fatalf("dolt --help: %v", err)
+		}
+	}
+	helpStr := string(globalHelp)
+	for _, flag := range []string{"--host", "--port", "--user", "--no-tls", "--use-db"} {
+		if !strings.Contains(helpStr, flag) {
+			t.Errorf("dolt global flag %q not found in `dolt --help` output; gc-nudge invocation may be broken", flag)
+		}
+	}
+	if !strings.Contains(helpStr, "sql") {
+		t.Errorf("dolt subcommand 'sql' not found in `dolt --help` output; gc-nudge invocation may be broken")
+	}
+
+	// Validate sql subcommand accepts -q flag.
+	sqlHelp, err := exec.Command(doltBin, "sql", "--help").CombinedOutput()
+	if err != nil && len(sqlHelp) == 0 {
+		t.Fatalf("dolt sql --help: %v", err)
+	}
+	if !strings.Contains(string(sqlHelp), "-q") {
+		t.Errorf("dolt sql flag '-q' not found in `dolt sql --help`; gc-nudge CALL DOLT_GC() invocation may be broken")
+	}
+}
