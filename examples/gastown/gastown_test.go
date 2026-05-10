@@ -1268,6 +1268,52 @@ func TestAllFormulasExist(t *testing.T) {
 	}
 }
 
+// TestAllPackTomlsParse decodes every *.toml file under
+// examples/gastown/packs/ to catch malformed formulas, agent manifests,
+// orders, and pack manifests at CI time. Without this, a description
+// string with an invalid TOML escape (e.g. "\<space>" inside a """..."""
+// block) silently fails formula registration at runtime — the agent
+// running that formula falls back to memory and skips load-bearing
+// steps. The remaining string-match formula tests in this file run
+// AFTER parse, so adding this gate up front keeps their failure
+// messages meaningful (they assume valid TOML).
+//
+// The walk includes pack.toml, formulas/*.toml, orders/*.toml, and
+// agents/*/agent.toml uniformly — they all share the same TOML
+// grammar, and we want any new TOML file added under packs/ to be
+// covered automatically without remembering to update this test.
+func TestAllPackTomlsParse(t *testing.T) {
+	dir := exampleDir()
+	packsRoot := filepath.Join(dir, "packs")
+
+	var count int
+	err := filepath.Walk(packsRoot, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".toml") {
+			return nil
+		}
+		count++
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Errorf("reading %s: %v", path, readErr)
+			return nil
+		}
+		var into map[string]any
+		if _, err := toml.Decode(string(data), &into); err != nil {
+			t.Errorf("parsing %s: %v", path, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walking %s: %v", packsRoot, err)
+	}
+	if count == 0 {
+		t.Fatalf("no .toml files found under %s — directory layout changed?", packsRoot)
+	}
+}
+
 func TestAllPromptTemplatesExist(t *testing.T) {
 	var count int
 	for _, a := range discoverPackAgents(t, filepath.Join("packs", "gastown")) {
