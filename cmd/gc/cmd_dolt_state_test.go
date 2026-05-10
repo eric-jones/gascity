@@ -2507,6 +2507,97 @@ func TestDoltStateStopManagedCmdDoesNotKillImposterPortHolder(t *testing.T) {
 	}
 }
 
+func TestDoltStateStopManagedCmdRemovesStaleLockAfterKill(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+
+	// Create a stale LOCK file under layout.DataDir simulating what dolt sql-server leaves behind.
+	lockFile := filepath.Join(layout.DataDir, "stg", ".dolt", "noms", "LOCK")
+	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(lock dir): %v", err)
+	}
+	if err := os.WriteFile(lockFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile(LOCK): %v", err)
+	}
+
+	port := reserveRandomTCPPort(t)
+	proc := startTCPListenerProcessInDir(t, port, layout.DataDir)
+	defer func() {
+		_ = proc.Process.Kill()
+		_ = proc.Wait()
+	}()
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(proc.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       proc.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", strconv.Itoa(port)}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if _, err := os.Stat(lockFile); !os.IsNotExist(err) {
+		t.Fatalf("LOCK file still present after stop-managed; stat err = %v", err)
+	}
+}
+
+func TestDoltStateStopManagedCmdRemovesStaleLockWhenNoPID(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+
+	// Create a stale LOCK left by a previously crashed process.
+	lockFile := filepath.Join(layout.DataDir, "stg", ".dolt", "noms", "LOCK")
+	if err := os.MkdirAll(filepath.Dir(lockFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(lock dir): %v", err)
+	}
+	if err := os.WriteFile(lockFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile(LOCK): %v", err)
+	}
+
+	stalePort := reserveRandomTCPPort(t)
+	if err := os.WriteFile(layout.PIDFile, []byte("999999\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+		Running:   true,
+		PID:       999999,
+		Port:      stalePort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "stop-managed", "--city", cityPath, "--port", strconv.Itoa(stalePort)}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	if _, err := os.Stat(lockFile); !os.IsNotExist(err) {
+		t.Fatalf("LOCK file still present after stop-managed (no-PID path); stat err = %v", err)
+	}
+}
+
 func TestDoltStateRecoverManagedCmdReportsReadOnlyAndRestarts(t *testing.T) {
 	skipSlowCmdGCTest(t, "spawns managed dolt recovery processes; run make test-cmd-gc-process for full coverage")
 	cityPath := t.TempDir()

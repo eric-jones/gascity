@@ -42,6 +42,9 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		if err := clearManagedDoltRuntime(layout, port); err != nil {
 			return report, err
 		}
+		if err := removeStaleManagedDoltLocks(layout.DataDir); err != nil {
+			return report, err
+		}
 		if clearPublishedState {
 			if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
 				return report, err
@@ -71,6 +74,9 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
 	}
 	if err := clearManagedDoltRuntime(layout, port); err != nil {
+		return report, err
+	}
+	if err := removeStaleManagedDoltLocks(layout.DataDir); err != nil {
 		return report, err
 	}
 	if clearPublishedState {
