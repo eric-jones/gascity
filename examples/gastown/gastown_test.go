@@ -213,6 +213,8 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	}
 
 	// Direct-merge path: metadata write must be chained into the close.
+	// --unset-metadata rejection_reason follows merged_target; the &&
+	// that gates gc bd close must appear after --unset-metadata.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
 		"--set-metadata merged_sha=$MERGED_SHA",
