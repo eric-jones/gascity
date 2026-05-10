@@ -249,7 +249,7 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 			}
 		}
 		return false
-	case "failed-create":
+	case string(session.StateFailedCreate):
 		// rollbackPendingCreate sets state="failed-create" only with
 		// Status=closed atomically. A Status=open + state="failed-create"
 		// combination means a write failed mid-rollback — release the
@@ -1581,7 +1581,7 @@ func setMetaBatch(store beads.Store, id string, batch map[string]string, stderr 
 }
 
 func closeFailedCreateBead(store beads.Store, id string, now time.Time, stderr io.Writer) bool {
-	patch := session.ClosePatch(now.UTC(), "failed-create")
+	patch := session.ClosePatch(now.UTC(), string(session.StateFailedCreate))
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	if setMetaBatch(store, id, patch, stderr) != nil {

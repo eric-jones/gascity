@@ -848,6 +848,27 @@ exit 0
 	return logPath
 }
 
+func writeBSDLikeGrep(t *testing.T, binDir string) {
+	t.Helper()
+	realGrep, err := exec.LookPath("grep")
+	if err != nil {
+		t.Fatalf("find grep: %v", err)
+	}
+	writeExecutable(t, filepath.Join(binDir, "grep"), fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+bre_alternation='\|'
+if [ "$#" -ge 2 ] && { [ "$1" = "-vi" ] || [ "$1" = "-i" ]; } && [[ "$2" == *"$bre_alternation"* ]]; then
+  if [ "$1" = "-vi" ]; then
+    shift 2
+    cat "$@"
+    exit 0
+  fi
+  exit 1
+fi
+exec %s "$@"
+`, shellQuote(realGrep)))
+}
+
 func TestBackupScriptSkipsOldDoltBeforeSync(t *testing.T) {
 	cityPath := t.TempDir()
 	dataDir := filepath.Join(cityPath, "dolt-data")
@@ -936,6 +957,34 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 	if strings.Contains(string(rsyncLog), dataDir+"/") {
 		t.Fatalf("rsync must not use live data dir, log:\n%s", rsyncLog)
+	}
+}
+
+func TestBackupScriptIgnoresDocumentedSystemSchemasForAutoDiscoveryWithBSDGrep(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	for _, db := range []string{"prod", "performance_schema", "sys"} {
+		if err := os.MkdirAll(filepath.Join(dataDir, db, ".dolt"), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", db, err)
+		}
+	}
+	binDir := t.TempDir()
+	_ = writeDogFakeGC(t, binDir)
+	writeBSDLikeGrep(t, binDir)
+	doltLogPath := writeBackupFakeDolt(t, binDir, "1.86.2", 0, "prod", "performance_schema", "sys")
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("unexpected backup summary:\n%s", out)
+	}
+	doltLog, err := os.ReadFile(doltLogPath)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	for _, systemDB := range []string{"performance_schema", "sys"} {
+		if strings.Contains(string(doltLog), "backup sync "+systemDB+"-backup") {
+			t.Fatalf("backup auto-discovery should ignore %s, log:\n%s", systemDB, doltLog)
+		}
 	}
 }
 
@@ -1064,6 +1113,48 @@ exit 0
 		if strings.Contains(string(gcLog), systemDB) {
 			t.Fatalf("doctor should ignore %s for backup freshness, log:\n%s", systemDB, gcLog)
 		}
+	}
+}
+
+func TestDoctorScriptDetectsDoctestOrphansWithBSDGrep(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	artifactDir := filepath.Join(cityPath, ".dolt-backup")
+	if err := os.MkdirAll(artifactDir, 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeBSDLikeGrep(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nprod\ndoctest_leftover\ndoctortest_leftover\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_BACKUP_STALE_S=1")
+	if !strings.Contains(out, "orphans: 2") {
+		t.Fatalf("doctor should report doctest/doctortest orphan databases, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "Orphan DBs: 2") {
+		t.Fatalf("doctor advisory should report orphan count, log:\n%s", gcLog)
 	}
 }
 

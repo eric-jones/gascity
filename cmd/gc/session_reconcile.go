@@ -1095,18 +1095,18 @@ func topoOrder(sessions []beads.Bead, deps map[string][]string) []beads.Bead {
 // during reconciliation to allow forward-compatible rollback from newer
 // versions that add states like "draining" or "archived".
 var knownSessionStates = map[string]bool{
-	"active":        true,
-	"asleep":        true,
-	"awake":         true,
-	"stopped":       true,
-	"suspended":     true,
-	"orphaned":      true,
-	"closed":        true,
-	"quarantined":   true,
-	"creating":      true,
-	"drained":       true,
-	"failed-create": true, // mid-rollback failure: Status=open + state=failed-create releases the alias
-	"":              true, // empty state is valid (legacy beads)
+	"active":                             true,
+	"asleep":                             true,
+	"awake":                              true,
+	"stopped":                            true,
+	"suspended":                          true,
+	"orphaned":                           true,
+	"closed":                             true,
+	"quarantined":                        true,
+	"creating":                           true,
+	"drained":                            true,
+	string(sessionpkg.StateFailedCreate): true, // Status=open + failed-create releases the alias
+	"":                                   true, // empty state is valid (legacy beads)
 }
 
 // isKnownState returns true if the bead's metadata state is recognized by

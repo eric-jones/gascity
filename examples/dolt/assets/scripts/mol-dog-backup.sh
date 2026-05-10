@@ -15,7 +15,7 @@ HOST="${GC_DOLT_HOST:-127.0.0.1}"
 USER="${GC_DOLT_USER:-root}"
 OFFSITE_PATH="${GC_BACKUP_OFFSITE_PATH:-}"
 BACKUP_ARTIFACT_DIR="${GC_BACKUP_ARTIFACT_DIR:-$GC_CITY_PATH/.dolt-backup}"
-SYSTEM_DBS="^information_schema$\|^mysql$\|^dolt_cluster$\|^__gc_probe$\|^performance_schema$\|^sys$"
+SYSTEM_DBS="^(information_schema|mysql|dolt_cluster|__gc_probe|performance_schema|sys)$"
 MIN_DOLT_BACKUP_VERSION="1.86.2"
 
 dolt_sql() {
@@ -93,7 +93,7 @@ if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
 else
     # Auto-discover: find databases that have a named Dolt backup <db>-backup.
     ALL_DBS=$(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2 | \
-        grep -vi "$SYSTEM_DBS" || true)
+        grep -viE "$SYSTEM_DBS" || true)
     DATABASES=""
     for db in $ALL_DBS; do
         db_dir="$DOLT_DATA_DIR/$db"
