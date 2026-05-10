@@ -370,6 +370,34 @@ func TestRefineryPromptSeedsTargetBranchVar(t *testing.T) {
 	}
 }
 
+// TestRefineryPromptRejectionFlowIncludesRoutedTo guards against the
+// regression observed in L5c v4 (2026-05-10): the prompt's "Rejection
+// Flow" section showed a partial bd update — `--status=open
+// --assignee="" --set-metadata rejection_reason="..."` — that omitted
+// `gc.routed_to`. The refinery agent ran exactly the partial command
+// from the prompt instead of the formula's full update, leaving the
+// rejected bead with stale `gc.routed_to=...refinery`. The pool
+// reconciler matches on `gc.routed_to`, so no polecat was ever spawned
+// to resume the bead.
+//
+// The fix shows the full bd update in the prompt and explicitly names
+// `gc.routed_to=...polecat` as load-bearing for pool spawn.
+func TestRefineryPromptRejectionFlowIncludesRoutedTo(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## Rejection Flow",
+		`--set-metadata rejection_reason=`,
+		`--set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat"`,
+	)
+}
+
 func TestRefineryFormulaSupportsMergeStrategies(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
