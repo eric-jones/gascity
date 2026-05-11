@@ -225,6 +225,40 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 	)
 }
 
+// TestRefineryPromptRejectionFlowEnforcesClearOnMerge guards against
+// the regression observed in L5c (2026-05-10): the refinery agent
+// merged a previously-rejected work bead and closed it, but never ran
+// `gc bd update --unset-metadata rejection_reason`. The closed bead
+// retained the stale `rejection_reason` field, so downstream tooling
+// could not distinguish "rejected and resolved" from "rejected and
+// abandoned" by reading metadata.
+//
+// The formula's `merge-push` step chains `--unset-metadata
+// rejection_reason` into the same `gc bd update` that records
+// `merged_sha` / `merged_target`, but the refinery prompt's "Rejection
+// Flow" section described only the set side of the lifecycle — the
+// LLM agent saw no closing-symmetry instruction in the prompt and
+// dropped the unset whenever it bypassed the formula's chained command.
+//
+// The fix adds a closing-symmetry note to the Rejection Flow section
+// naming the obligation: on merging a previously-rejected bead, clear
+// `rejection_reason` before `gc bd close`.
+func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+
+	assertContainsInOrder(t, body,
+		"## Rejection Flow",
+		"clear\n`rejection_reason` before `gc bd close`",
+		"--unset-metadata\nrejection_reason",
+	)
+}
+
 func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
