@@ -206,12 +206,18 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		t.Fatalf("reading refinery formula: %v", err)
 	}
 	body := string(data)
+	normalizedBody := strings.Join(strings.Fields(body), " ")
+	unsetRationale := "`--unset-metadata rejection_reason` clears any stale rejection field"
+	if count := strings.Count(normalizedBody, unsetRationale); count != 2 {
+		t.Fatalf("refinery formula should explain rejection_reason cleanup in both close paths, found %d occurrences", count)
+	}
 
 	// Direct-merge path: metadata write must be chained into the close.
 	assertContainsInOrder(t, body,
 		"--set-metadata merge_result=merged",
 		"--set-metadata merged_sha=$MERGED_SHA",
-		"--set-metadata merged_target=$TARGET &&",
+		"--set-metadata merged_target=$TARGET",
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Merged to $TARGET at $MERGED_SHORT"`,
 	)
 
@@ -220,7 +226,8 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 		"--set-metadata merge_result=pull_request",
 		`--set-metadata pr_url="$PR_URL"`,
 		`--set-metadata pr_number="$PR_NUMBER"`,
-		`--set-metadata merged_target="$TARGET" &&`,
+		`--set-metadata merged_target="$TARGET"`,
+		"--unset-metadata rejection_reason &&",
 		`gc bd close $WORK --reason "Pull request ready: $PR_URL"`,
 	)
 }
@@ -234,11 +241,11 @@ func TestRefineryFormulaChainsMergeMetadataWithClose(t *testing.T) {
 // abandoned" by reading metadata.
 //
 // The formula's `merge-push` step chains `--unset-metadata
-// rejection_reason` into the same `gc bd update` that records
-// `merged_sha` / `merged_target`, but the refinery prompt's "Rejection
-// Flow" section described only the set side of the lifecycle — the
-// LLM agent saw no closing-symmetry instruction in the prompt and
-// dropped the unset whenever it bypassed the formula's chained command.
+// rejection_reason` into the terminal `gc bd update`, but the refinery
+// prompt's "Rejection Flow" section described only the set side of the
+// lifecycle — the LLM agent saw no closing-symmetry instruction in the
+// prompt and dropped the unset whenever it bypassed the formula's chained
+// command.
 //
 // The fix adds a closing-symmetry note to the Rejection Flow section
 // naming the obligation: on merging a previously-rejected bead, clear
@@ -250,12 +257,12 @@ func TestRefineryPromptRejectionFlowEnforcesClearOnMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading refinery prompt: %v", err)
 	}
-	body := string(data)
+	body := strings.Join(strings.Fields(string(data)), " ")
 
 	assertContainsInOrder(t, body,
 		"## Rejection Flow",
-		"clear\n`rejection_reason` before `gc bd close`",
-		"--unset-metadata\nrejection_reason",
+		"clear `rejection_reason` before `gc bd close`",
+		"--unset-metadata rejection_reason",
 	)
 }
 
