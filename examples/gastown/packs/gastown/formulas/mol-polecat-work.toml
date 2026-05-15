@@ -235,14 +235,16 @@ picks it up and resumes from the existing branch.
 
 **6. Signal refinery to check for work immediately (belt-and-suspenders):**
 ```bash
-gc session wake "$REFINERY_TARGET" 2>/dev/null || true   # start if stopped (on_demand)
-gc session nudge "$REFINERY_TARGET" 2>/dev/null || true  # signal to check now if running
+REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
+gc session wake "$REFINERY_TARGET" || true
+gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 ```
 
 The `gc bd update` in step 5 generates a `bead.updated` event the refinery's
 event-watch will see, but that can take up to `event_timeout` seconds. Wake
-starts a stopped on_demand session; nudge signals a running one — together they
-cover both cases. Failure is non-fatal: the refinery finds the work on its next poll.
+starts a stopped on_demand session; nudge leaves a visible prompt for a running
+one as soon as it is ready for input. Failure is non-fatal: the refinery finds
+the work on its next poll.
 
 **7. Signal reconciler and exit.**
 ```bash
