@@ -48,6 +48,9 @@ type PromptContext struct {
 	// ProviderKey when nothing else matches.
 	ProviderDisplayName string
 	Env                 map[string]string // from Agent.Env — custom vars
+	// Dirs holds resolved workspace directory paths for opted-in agents.
+	// Available in templates as {{ range $name, $path := .Dirs }}.
+	Dirs map[string]string
 }
 
 // PromptRenderResult holds the rendered text plus the version and rendered
@@ -280,8 +283,8 @@ func effectivePromptFragments(global, inject, appendFragments, inherited, defaul
 
 // buildTemplateData merges Env (lower priority) with SDK fields (higher
 // priority) into a single map for template execution.
-func buildTemplateData(ctx PromptContext) map[string]string {
-	m := make(map[string]string, len(ctx.Env)+10)
+func buildTemplateData(ctx PromptContext) map[string]interface{} {
+	m := make(map[string]interface{}, len(ctx.Env)+12)
 	for k, v := range ctx.Env {
 		m[k] = v
 	}
@@ -301,6 +304,7 @@ func buildTemplateData(ctx PromptContext) map[string]string {
 	m["SlingQuery"] = ctx.SlingQuery
 	m["ProviderKey"] = ctx.ProviderKey
 	m["ProviderDisplayName"] = ctx.ProviderDisplayName
+	m["Dirs"] = ctx.Dirs
 	return m
 }
 
