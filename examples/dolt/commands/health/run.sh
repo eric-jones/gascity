@@ -238,6 +238,12 @@ fi
 # Rig-local Dolt servers (configured via dolt.port in config.yaml)
 # are legitimate — exclude any PID listening on a known rig port.
 #
+# Foreign Dolt servers (managed by OTHER cities on the same host) are
+# also legitimate. We recognize them by parsing `--config <path>` from
+# the process command line and checking the sibling dolt.pid for a
+# self-reference. Without this, every patrol in every city flags the
+# others as zombies on shared dev hosts.
+#
 # GC_HEALTH_SKIP_ZOMBIE_SCAN is a test-only escape hatch. Zombie
 # enumeration spawns one `ps` per matching process, which on shared
 # dev machines with many accumulated dolt processes dominates the
@@ -260,6 +266,18 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -n "$rig_pid" ] && rig_dolt_pids="$rig_dolt_pids $rig_pid "
   done < "$_meta_cache"
 
+  # Parse `--config <path>` (or `--config=<path>`) from a `ps` args line.
+  extract_config_path() {
+    printf '%s\n' "$1" | awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "--config" && (i + 1) <= NF) { print $(i+1); exit }
+          if (index($i, "--config=") == 1) { print substr($i, 10); exit }
+        }
+      }
+    '
+  }
+
   for p in $(pgrep -x dolt 2>/dev/null || true); do
     [ "$p" = "$server_pid" ] && continue
     case "$rig_dolt_pids" in *" $p "*) continue ;; esac
@@ -268,6 +286,17 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
       *sql-server*) ;;
       *) continue ;;
     esac
+    # Foreign-managed check: if --config points at a yaml whose sibling
+    # dolt.pid claims this PID, the process is owned by another managed
+    # Dolt instance (another city on this host) — not a zombie.
+    config_path=$(extract_config_path "$cmd")
+    if [ -n "$config_path" ] && [ -f "$config_path" ]; then
+      foreign_pid_file="$(dirname "$config_path")/dolt.pid"
+      if [ -f "$foreign_pid_file" ]; then
+        recorded_pid=$(head -1 "$foreign_pid_file" 2>/dev/null | tr -d ' \t\r\n')
+        [ "$recorded_pid" = "$p" ] && continue
+      fi
+    fi
     zombie_count=$((zombie_count + 1))
     zombie_pids="$zombie_pids $p"
   done
