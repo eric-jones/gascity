@@ -4930,6 +4930,125 @@ func TestHasOpenWorkStrictSkipsClosedTrackingBead(t *testing.T) {
 	}
 }
 
+// TestHasOpenWorkStrictBlocksOnWispWithOpenChildren is the regression guard
+// for tr-kds01: the deacon's cooldown gate fired a new digest wisp every 24h
+// even when the prior wisp's step beads had never been picked up by the pool
+// agent. The leftover open wisp root (no labelOrderTracking) is normally
+// treated as orphan state (ga-jra/ga-lo8c). But when the wisp's child step
+// beads are still open, the wisp is in-flight work — the pool agent simply
+// hasn't completed it yet — and the gate must block.
+func TestHasOpenWorkStrictBlocksOnWispWithOpenChildren(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Step bead still open — pool agent hasn't picked it up yet.
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if !has {
+		t.Fatal("wisp root with open child step beads must count as in-flight; " +
+			"the gate ignored them and the next cooldown tick poured a duplicate wisp (tr-kds01)")
+	}
+}
+
+// TestHasOpenWorkStrictAllowsWispWithAllChildrenClosed protects the
+// ga-jra/ga-lo8c invariant after the tr-kds01 fix. A wisp root whose step
+// beads are ALL closed represents work that completed (or was hand-cleaned)
+// but whose root was never auto-closed — molecule roots never close
+// themselves. Such a root must not permanently block re-dispatch.
+func TestHasOpenWorkStrictAllowsWispWithAllChildrenClosed(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Labels: []string{"order-run:digest"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(child.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	ad := &memoryOrderDispatcher{}
+	has, err := ad.hasOpenWorkStrict(store, "digest")
+	if err != nil {
+		t.Fatalf("hasOpenWorkStrict: %v", err)
+	}
+	if has {
+		t.Fatal("wisp root with all children closed is leftover state, not in-flight work; " +
+			"counting it would permanently block re-dispatch (ga-jra/ga-lo8c)")
+	}
+}
+
+// TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch is the
+// integration-level guard for tr-kds01. The scenario: a periodic
+// formula+pool order whose first dispatch's step beads were never picked
+// up by the pool agent. The wisp root and its step beads sit open. The
+// next cooldown tick MUST NOT fire another wisp.
+func TestOrderDispatchOpenWispWithOpenStepsBlocksRedispatch(t *testing.T) {
+	store := beads.NewMemStore()
+
+	wispRoot, err := store.Create(beads.Bead{
+		Title:  "mol-digest-generate",
+		Labels: []string{"order-run:my-pool-order"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Step bead still open — pool never picked up the prior wisp's work.
+	if _, err := store.Create(beads.Bead{
+		Title:    "determine-period",
+		ParentID: wispRoot.ID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ran := false
+	fakeExec := func(_ context.Context, _, _ string, _ []string) ([]byte, error) {
+		ran = true
+		return nil, nil
+	}
+
+	aa := []orders.Order{{
+		Name:     "my-pool-order",
+		Trigger:  "cooldown",
+		Interval: "1s",
+		Exec:     "scripts/run.sh",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, nil)
+
+	ad.dispatch(context.Background(), t.TempDir(), time.Now().Add(5*time.Second))
+	ad.drain(context.Background())
+
+	if ran {
+		t.Fatal("exec must NOT run — prior wisp has open step beads, " +
+			"the cooldown gate must treat it as in-flight (tr-kds01)")
+	}
+}
+
 // Unused but keep for future event assertion tests.
 var (
 	_ = (*memRecorder).hasSubject

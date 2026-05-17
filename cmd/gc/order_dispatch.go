@@ -983,18 +983,26 @@ func (m *memoryOrderDispatcher) rigSuspendedByName(rigName string) bool {
 	return false
 }
 
-// hasOpenWorkStrict reports whether an open tracking bead exists for this
-// order — i.e. a dispatchOne goroutine is still in flight. Tracking beads
-// carry both "order-run:<scoped>" and labelOrderTracking; dispatchOne closes
-// them via defer when dispatch returns.
+// hasOpenWorkStrict reports whether any in-flight work exists for this
+// order — either a dispatchOne goroutine still running, or a wisp whose
+// step beads have not all been completed by the pool agent.
 //
-// Wisp root beads also carry "order-run:<scoped>" (so gc order history and
-// the orders API feed can attribute the wisp to its order), but molecule
-// roots never auto-close when their step beads finish. A leftover open
-// root is not in-flight work and must not block re-dispatch — counting it
-// caused ga-jra/ga-lo8c, where formula+pool orders stalled indefinitely
-// after a city restart because the first auto-fire's wisp root permanently
-// tripped this check.
+// Tracking beads carry both "order-run:<scoped>" and labelOrderTracking;
+// dispatchOne closes them via defer when dispatch returns. An open
+// tracking bead means a dispatchOne goroutine is in flight.
+//
+// Wisp root beads also carry "order-run:<scoped>" (so gc order history
+// and the orders API feed can attribute the wisp to its order) but never
+// carry labelOrderTracking. Molecule roots never auto-close when their
+// step beads finish, so a leftover open root with all-closed children is
+// orphan state — counting it would permanently block re-dispatch
+// (ga-jra/ga-lo8c, where formula+pool orders stalled after a city restart
+// because the first auto-fire's wisp root tripped this check). But a
+// wisp root whose child step beads are still open IS in-flight work: the
+// pool agent has not yet executed the wisp. Counting those prevents the
+// cooldown gate from pouring duplicate wisps when the pool stalls
+// (tr-kds01, where 24h-interval digest wisps accumulated because the
+// pool never picked them up).
 func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName string) (bool, error) {
 	results, err := store.List(beads.ListQuery{
 		Label:    "order-run:" + scopedName,
@@ -1008,10 +1016,35 @@ func (m *memoryOrderDispatcher) hasOpenWorkStrict(store beads.Store, scopedName 
 		if b.Status == "closed" {
 			continue
 		}
-		for _, lbl := range b.Labels {
-			if lbl == labelOrderTracking {
-				return true, nil
-			}
+		if beadLabelsContain(b.Labels, labelOrderTracking) {
+			return true, nil
+		}
+		hasOpenChildren, err := storeHasOpenChildren(store, b.ID)
+		if err != nil {
+			return false, fmt.Errorf("checking open children of wisp %s: %w", b.ID, err)
+		}
+		if hasOpenChildren {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// storeHasOpenChildren reports whether any non-closed beads name parentID
+// as their ParentID. Filters status in Go (not just via IncludeClosed)
+// so a misbehaving store wrapper that leaks closed beads cannot fool the
+// caller's in-flight check.
+func storeHasOpenChildren(store beads.Store, parentID string) (bool, error) {
+	children, err := store.List(beads.ListQuery{
+		ParentID: parentID,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return false, err
+	}
+	for _, c := range children {
+		if c.Status != "closed" {
+			return true, nil
 		}
 	}
 	return false, nil
