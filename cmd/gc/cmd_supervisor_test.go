@@ -4672,6 +4672,161 @@ func TestSupervisorShutdownModeForSignalPreservesOnlySIGTERMWhenConfigured(t *te
 	}
 }
 
+// installHardExitHook replaces supervisorHardExit with a test hook that
+// records the exit code and signals via the returned channel instead of
+// terminating the test process. Restores the original on cleanup.
+func installHardExitHook(t *testing.T) <-chan int {
+	t.Helper()
+	calls := make(chan int, 1)
+	prev := supervisorHardExit
+	supervisorHardExit = func(code int) {
+		select {
+		case calls <- code:
+		default:
+		}
+	}
+	t.Cleanup(func() { supervisorHardExit = prev })
+	return calls
+}
+
+func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
+	hardExitCalls := installHardExitHook(t)
+
+	sigCh := make(chan os.Signal, 2)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 4)
+
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
+		shutdowns <- mode
+	}, func() {})
+	defer close(done)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("first signal mode = %v, want destructive", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SIGTERM did not trigger requestShutdown")
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("hard exit fired after only one destructive signal, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case code := <-hardExitCalls:
+		if code != supervisorHardExitCodeSecondSignal {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeSecondSignal)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second SIGTERM did not trigger hard exit")
+	}
+	select {
+	case mode := <-shutdowns:
+		t.Fatalf("second SIGTERM should hard-exit before calling requestShutdown; got mode %v", mode)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *testing.T) {
+	t.Setenv(supervisorPreserveSessionsOnSignalEnv, "1")
+	hardExitCalls := installHardExitHook(t)
+
+	sigCh := make(chan os.Signal, 3)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 4)
+
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
+		shutdowns <- mode
+	}, func() {})
+	defer close(done)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownPreserveSessions {
+			t.Fatalf("first signal mode = %v, want preserve", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first SIGTERM did not trigger requestShutdown")
+	}
+
+	sigCh <- syscall.SIGINT
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("escalation mode = %v, want destructive", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGINT escalation did not trigger requestShutdown")
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("hard exit fired during normal preserve→destructive escalation, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigCh <- syscall.SIGINT
+	select {
+	case code := <-hardExitCalls:
+		if code != supervisorHardExitCodeSecondSignal {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeSecondSignal)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second destructive signal after escalation did not trigger hard exit")
+	}
+}
+
+func TestSupervisorSignalLoopSIGHUPDoesNotCountTowardHardExit(t *testing.T) {
+	hardExitCalls := installHardExitHook(t)
+
+	sigCh := make(chan os.Signal, 4)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 4)
+	reconciles := make(chan struct{}, 4)
+
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
+		shutdowns <- mode
+	}, func() {
+		reconciles <- struct{}{}
+	})
+	defer close(done)
+
+	sigCh <- syscall.SIGHUP
+	sigCh <- syscall.SIGHUP
+	for i := 0; i < 2; i++ {
+		select {
+		case <-reconciles:
+		case <-time.After(time.Second):
+			t.Fatalf("SIGHUP %d did not trigger reconcile", i+1)
+		}
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("SIGHUP triggered hard exit, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case mode := <-shutdowns:
+		if mode != supervisorShutdownDestructive {
+			t.Fatalf("SIGTERM after SIGHUPs mode = %v, want destructive", mode)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGTERM after SIGHUPs did not trigger requestShutdown")
+	}
+	select {
+	case code := <-hardExitCalls:
+		t.Fatalf("first SIGTERM after SIGHUPs triggered hard exit, code=%d", code)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestStopSupervisorWithWaitStopsSystemdServiceAfterAckBeforeDone(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("systemd path only applies on linux")

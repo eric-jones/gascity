@@ -209,6 +209,19 @@ var supervisorShutdownSettleDelay = 50 * time.Millisecond
 
 var supervisorSignalNotify = signal.Notify
 
+// supervisorHardExitCodeSecondSignal is the exit code for the second-signal
+// hard-exit path. 130 is the shell convention for "terminated by SIGINT,"
+// which lets operators distinguish this from clean exit (0) or
+// graceful-stop error (1).
+const supervisorHardExitCodeSecondSignal = 130
+
+// supervisorHardExit terminates the supervisor immediately, bypassing the
+// graceful-shutdown sequence. Overridable for tests.
+var supervisorHardExit = func(code int) {
+	fmt.Fprintln(os.Stderr, "gc supervisor: second shutdown signal received; exiting immediately") //nolint:errcheck
+	os.Exit(code)
+}
+
 func supervisorPreserveSessionsOnSignal() bool {
 	return os.Getenv(supervisorPreserveSessionsOnSignalEnv) == "1"
 }
@@ -284,6 +297,10 @@ func requestSupervisorShutdown(stderr io.Writer, rec events.Recorder, shutdownCt
 }
 
 func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestShutdown func(supervisorShutdownMode, shutdownTrigger), requestReconcile func()) {
+	// Repeated destructive signals would otherwise be silently absorbed
+	// (shutdownCtl.request and cancel() are both idempotent), so a second
+	// SIGINT/SIGTERM escalates to a hard exit instead of looking ignored.
+	destructiveSignalCount := 0
 	for {
 		select {
 		case sig := <-sigCh:
@@ -294,7 +311,15 @@ func supervisorSignalLoop(sigCh <-chan os.Signal, done <-chan struct{}, requestS
 				requestReconcile()
 				continue
 			}
-			requestShutdown(supervisorShutdownModeForSignal(sig), shutdownTrigger{
+			mode := supervisorShutdownModeForSignal(sig)
+			if mode == supervisorShutdownDestructive {
+				destructiveSignalCount++
+				if destructiveSignalCount >= 2 {
+					supervisorHardExit(supervisorHardExitCodeSecondSignal)
+					return
+				}
+			}
+			requestShutdown(mode, shutdownTrigger{
 				Source: "signal",
 				Signal: sig.String(),
 			})
