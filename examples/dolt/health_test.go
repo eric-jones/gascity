@@ -823,6 +823,123 @@ func TestHealthScriptZombieScanExcludesRigLocalServers(t *testing.T) {
 	}
 }
 
+// TestHealthScriptZombieScanExcludesSiblingCityServers verifies that
+// Dolt sql-server processes whose `--config` argument points outside
+// our city's directory are not flagged as zombies. Regression guard
+// for the bug where running multiple gc cities on one host caused
+// each city's health report to misclassify the other cities' live
+// dolt servers as zombies.
+func TestHealthScriptZombieScanExcludesSiblingCityServers(t *testing.T) {
+	cityPath := t.TempDir()
+	siblingCityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	mainPort := "19911"
+	mainPID := "424301"
+	siblingPID := "424302" // sql-server owned by another city
+	zombiePID := "424303"  // sql-server with --config under our city
+
+	// City .beads directory with metadata.
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"city"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Sibling city .beads directory — not referenced from our city.
+	if err := os.MkdirAll(filepath.Join(siblingCityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(siblingCityPath, ".beads", "metadata.json"),
+		[]byte(`{"dolt_database":"sibling"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fake gc: fail so metadata_files() falls back to find. We do NOT
+	// register the sibling city as a rig of ours — exclusion must come
+	// from the --config inspection, not from rig discovery.
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake pgrep: returns main PID, sibling PID, and a true zombie PID.
+	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
+		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, siblingPID, zombiePID))
+
+	// Fake lsof: maps the main port to mainPID. No rig ports configured.
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+		fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+  case "$arg" in
+    -iTCP:%s) echo %s; exit 0 ;;
+  esac
+done
+exit 1
+`, mainPort, mainPID))
+
+	// Fake ps: handles pid_is_running (-o pid=) and the zombie scan
+	// (-o args=). The args= response varies per PID so the script
+	// sees a sibling-city --config for siblingPID and an own-city
+	// --config for zombiePID.
+	writeExecutable(t, filepath.Join(fakeBin, "ps"), fmt.Sprintf(`#!/bin/sh
+if [ "$1" = "-p" ] && [ "$3" = "-o" ]; then
+  case "$4" in
+    pid=) printf ' %%s\n' "$2"; exit 0 ;;
+    args=)
+      case "$2" in
+        %s) echo "dolt sql-server --config %s/.gc/runtime/packs/dolt/dolt-config.yaml"; exit 0 ;;
+        %s) echo "dolt sql-server --config %s/.gc/runtime/packs/dolt/dolt-config.yaml"; exit 0 ;;
+        *)  echo "dolt sql-server"; exit 0 ;;
+      esac
+      ;;
+  esac
+fi
+exit 1
+`, siblingPID, siblingCityPath, zombiePID, cityPath))
+
+	// Fake nc: unreachable (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
+
+	// Fake dolt: SELECT 1 fails (no real server).
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(
+		filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+			"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+mainPort,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("health.sh failed: %v\n%s", err, out)
+	}
+
+	output := string(out)
+
+	// Only the own-city zombie should be counted.
+	if !strings.Contains(output, `"zombie_count": 1`) {
+		t.Errorf("expected zombie_count 1; got:\n%s", output)
+	}
+
+	// Sibling-city PID must NOT appear in zombie_pids.
+	if strings.Contains(output, siblingPID) {
+		t.Errorf("sibling-city Dolt PID %s should not be in zombie_pids; got:\n%s", siblingPID, output)
+	}
+
+	// True zombie PID must appear in zombie_pids.
+	if !strings.Contains(output, zombiePID) {
+		t.Errorf("true zombie PID %s should be in zombie_pids; got:\n%s", zombiePID, output)
+	}
+}
+
 // TestHealthScriptJSONAlwaysExitsZero guards the JSON-mode exit
 // contract. Automation consumers (notably the deacon patrol formula)
 // parse the JSON payload and key health decisions off `server.reachable`.

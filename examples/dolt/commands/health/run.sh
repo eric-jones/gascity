@@ -260,6 +260,13 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
     [ -n "$rig_pid" ] && rig_dolt_pids="$rig_dolt_pids $rig_pid "
   done < "$_meta_cache"
 
+  # Canonicalize the city path once so the per-process --config check
+  # below can compare against a stable prefix. canonical_path resolves
+  # symlinks (notably /private/tmp ↔ /tmp on macOS) so a city path
+  # passed as /tmp/... still matches a --config recorded as /private/tmp/...
+  city_path_canonical=$(canonical_path "$GC_CITY_PATH" 2>/dev/null || printf '%s' "$GC_CITY_PATH")
+  city_path_canonical=${city_path_canonical%/}
+
   for p in $(pgrep -x dolt 2>/dev/null || true); do
     [ "$p" = "$server_pid" ] && continue
     case "$rig_dolt_pids" in *" $p "*) continue ;; esac
@@ -268,6 +275,30 @@ if [ "${GC_HEALTH_SKIP_ZOMBIE_SCAN:-0}" != "1" ]; then
       *sql-server*) ;;
       *) continue ;;
     esac
+    # Sibling-city exclusion: extract the --config path from the
+    # command line. The gc launcher always spawns dolt as
+    # `dolt sql-server --config <city>/.gc/runtime/packs/dolt/dolt-config.yaml`,
+    # so the config path uniquely identifies which city owns the
+    # process. If it points outside our city tree, the process belongs
+    # to a sibling city — skip. If --config is absent (legacy
+    # invocation or hand-started server), fall through to the original
+    # "treat as zombie" behavior so we do not silently lose visibility.
+    config_path=$(printf '%s' "$cmd" | awk '
+      {
+        for (i = 1; i <= NF; i++) {
+          if ($i == "--config" && i + 1 <= NF) { print $(i+1); exit }
+          if (substr($i, 1, 9) == "--config=") { print substr($i, 10); exit }
+        }
+      }
+    ')
+    if [ -n "$config_path" ]; then
+      config_canonical=$(canonical_path "$config_path" 2>/dev/null || printf '%s' "$config_path")
+      case "$config_canonical" in
+        "$city_path_canonical"/*) ;;  # under this city — fall through
+        "$city_path_canonical") ;;     # exact match (defensive — config is normally a file under the city)
+        *) continue ;;                  # different city — not our zombie to report
+      esac
+    fi
     zombie_count=$((zombie_count + 1))
     zombie_pids="$zombie_pids $p"
   done
