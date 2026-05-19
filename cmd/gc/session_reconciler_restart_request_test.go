@@ -305,3 +305,80 @@ func TestReconcileSessionBeads_RestartRequestPreservesIntentWhenKillFails(t *tes
 }
 
 func restartRequestTestIntPtr(n int) *int { return &n }
+
+// TestReconcileSessionBeads_RestartRequestRespawnsAlwaysNamedSessionSameTick
+// guards the request-restart respawn contract. When the reconciler honors a
+// restart-requested mode=always named session it MUST stop the runtime AND
+// respawn it within the same reconcile pass — the single-tick dead->respawn
+// path `gc session kill` relies on, and the same fall-through the idle-timeout
+// and max-session-age kills use.
+//
+// Forensic source: incident gc-rm0ha.42. The town deacon (a mode=always named
+// session) ran `gc runtime request-restart`, the controller killed its pane,
+// but the reconciler never respawned it — the deacon was dark ~9h. A plain
+// `gc session kill` triggered the respawn that request-restart did not. The
+// restart-requested branch used to `continue` after the kill, deferring the
+// respawn to a future tick; that inter-tick window is what stranded the
+// session. The single-tick tests above verify the kill+patch handoff but never
+// exercise the respawn; this test does.
+func TestReconcileSessionBeads_RestartRequestRespawnsAlwaysNamedSessionSameTick(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Providers: map[string]config.ProviderSpec{
+			"p": {Command: "true", PromptMode: "none", SessionIDFlag: "--session-id"},
+		},
+		Agents:        []config.Agent{{Name: "worker", Provider: "p"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	tp := TemplateParams{
+		Command:                 "true",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		InstanceName:            "worker",
+		Alias:                   "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+		ResolvedProvider: &config.ResolvedProvider{
+			Name:          "p",
+			Command:       "true",
+			PromptMode:    "none",
+			SessionIDFlag: "--session-id",
+		},
+	}
+	env.desiredState[sessionName] = tp
+
+	session := env.createSessionBead(sessionName, "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"restart_requested":          "true",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	// One reconcile pass: stop the restart-requested runtime, then respawn it.
+	woken := env.reconcile([]beads.Bead{session})
+	if woken != 1 {
+		t.Fatalf("woken = %d, want 1 — restart-requested mode=always session was not respawned in the same tick; stderr=%s",
+			woken, env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("mode=always session was not respawned after the request-restart kill")
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("get after reconcile: %v", err)
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want cleared by RestartRequestPatch", got.Metadata["restart_requested"])
+	}
+}

@@ -1117,12 +1117,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Restart-requested: agent asked for a fresh session
-		// (gc runtime request-restart / gc handoff). Rotate session_key
-		// to a fresh value and clear started_config_hash so the next wake
-		// builds a first-start command (--session-id <new_key>). Also set
-		// continuation_reset_pending so the next wake bumps the continuation
-		// epoch instead of silently reusing the prior continuation lineage.
-		// Then stop immediately; the next tick will re-create and re-wake.
+		// (gc runtime request-restart / gc handoff). Stop the runtime, then
+		// transition the bead to asleep with the first-start-forcing fields
+		// cleared (RestartRequestPatch): rotate session_key, clear
+		// started_config_hash so the next wake builds a first-start command
+		// (--session-id <new_key>), and set continuation_reset_pending so the
+		// next wake bumps the continuation epoch instead of silently reusing
+		// the prior continuation lineage.
+		//
+		// Do NOT `continue` after stopping: set alive=false and fall through
+		// to the wake logic so the respawn lands on THIS tick — the
+		// single-tick dead->respawn path `gc session kill` relies on, and the
+		// same fall-through the idle-timeout and max-session-age kills use.
+		// Deferring the respawn to a future tick (the old behavior) opened an
+		// inter-tick window that stranded restart-requested sessions asleep
+		// (incident gc-rm0ha.42: the town deacon stayed dark ~9h after
+		// `gc runtime request-restart`).
 		//
 		// Check both tmux metadata (dops) and bead metadata. The bead
 		// metadata flag survives tmux session death, so this works even
@@ -1149,7 +1159,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// intentional death from crash and churn trackers (both
 				// check last_woke_at first).
 				newSessionKey, hasCapability := freshRestartSessionKey(tp, session.Metadata)
-				batch := sessionpkg.RestartRequestPatch(newSessionKey)
+				batch := sessionpkg.RestartRequestPatch(newSessionKey, clk.Now())
 				if hasCapability && newSessionKey == "" {
 					batch["session_key"] = ""
 				}
@@ -1169,7 +1179,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
 				}
-				continue
+				// Runtime stopped and the bead is asleep. Fall through (no
+				// continue) so the wake logic respawns it on this same tick.
+				alive = false
 			}
 		}
 

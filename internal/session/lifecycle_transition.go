@@ -290,13 +290,21 @@ func CompleteDrainPatch(now time.Time, reason string, freshWake bool) MetadataPa
 }
 
 // RestartRequestPatch records a controller handoff to a fresh provider
-// conversation. It intentionally clears only the fields that force the next
-// wake onto a first-start path; started_live_hash/live_hash remain intact until
-// the next successful start rewrites them so restart-in-flight drift readers do
-// not observe an empty-hash backfill state. The caller owns stopping any
-// currently running runtime.
-func RestartRequestPatch(sessionKey string) MetadataPatch {
+// conversation after the caller has stopped the running runtime. It transitions
+// the bead to asleep — the runtime is gone, so the bead must say so rather than
+// linger at active and misreport a dead session as healthy — and clears the
+// fields that force the next wake onto a first-start path. started_live_hash/
+// live_hash remain intact until the next successful start rewrites them so
+// restart-in-flight drift readers do not observe an empty-hash backfill state.
+// The caller owns stopping any currently running runtime and is expected to
+// re-wake the asleep bead in the same reconcile pass so the respawn is not
+// deferred to a future tick (incident gc-rm0ha.42).
+func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
+		"state":                      string(StateAsleep),
+		"sleep_reason":               "restart-requested",
+		"slept_at":                   now.UTC().Format(time.RFC3339),
+		"sleep_intent":               "",
 		"restart_requested":          "",
 		"started_config_hash":        "",
 		"continuation_reset_pending": "true",

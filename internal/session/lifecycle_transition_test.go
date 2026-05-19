@@ -172,8 +172,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "restart request",
-			patch: RestartRequestPatch("new-session-key"),
+			patch: RestartRequestPatch("new-session-key", now),
 			want: MetadataPatch{
+				"state":                      string(StateAsleep),
+				"sleep_reason":               "restart-requested",
+				"slept_at":                   now.Format(time.RFC3339),
+				"sleep_intent":               "",
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
@@ -185,8 +189,12 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 		},
 		{
 			name:  "restart request without rotated key",
-			patch: RestartRequestPatch(""),
+			patch: RestartRequestPatch("", now),
 			want: MetadataPatch{
+				"state":                      string(StateAsleep),
+				"sleep_reason":               "restart-requested",
+				"slept_at":                   now.Format(time.RFC3339),
+				"sleep_intent":               "",
 				"restart_requested":          "",
 				"started_config_hash":        "",
 				"continuation_reset_pending": "true",
