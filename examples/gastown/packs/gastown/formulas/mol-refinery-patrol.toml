@@ -27,6 +27,14 @@ In `mr` mode, refinery treats PR publication as the terminal handoff for
 the direct-bead workflow: it records the PR URL on the work bead and
 closes the bead once the PR is verified.
 
+Fork-based branches: when a work branch lives on a fork remote rather
+than `origin` (the refinery has no push access to `origin`), the
+refinery rebases from the fork, forces the `mr` handoff, and opens a
+cross-repo pull request from the fork. A fork-based branch is never
+landed directly. The branch's remote comes from `metadata.remote`,
+defaulting to the conventional `fork` remote when a branch is absent
+from `origin`.
+
 Read each step's description before acting — Config values override defaults."""
 formula = "mol-refinery-patrol"
 version = 4
@@ -180,10 +188,33 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 ```
 
-Fetch and attempt mechanical rebase:
+Resolve which remote hosts the source branch. The same-repo flow pushes
+the branch to `origin`; a fork-based contribution flow (used when the
+refinery has no push access to `origin`) pushes it to a fork remote. A
+branch absent from `origin` is fork-based: `metadata.remote` names its
+remote, defaulting to the conventional `fork` remote. Record the
+resolved remote on the work bead so later steps reuse it.
 ```bash
 git fetch --prune origin
-git checkout -b temp origin/$BRANCH
+SOURCE_REMOTE=origin
+if ! git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+  SOURCE_REMOTE=$(gc bd show $WORK --json | jq -r '.[0].metadata.remote // "fork"')
+  git fetch --prune "$SOURCE_REMOTE" || true
+fi
+gc bd update $WORK --set-metadata source_remote="$SOURCE_REMOTE"
+```
+
+If the branch exists on neither `origin` nor `$SOURCE_REMOTE`
+(`git ls-remote --heads "$SOURCE_REMOTE" "$BRANCH"` returns nothing),
+the source branch was lost. Do NOT check it out — follow the
+rebase-failure rejection sequence below with
+`rejection_reason="Branch $BRANCH not found on origin or $SOURCE_REMOTE"`,
+skipping the `git rebase --abort` and `temp` cleanup (no rebase started).
+
+Check out the branch from its source remote and attempt a mechanical
+rebase (the target branch always lives on `origin`):
+```bash
+git checkout -b temp "$SOURCE_REMOTE/$BRANCH"
 git rebase origin/$TARGET
 ```
 
@@ -255,10 +286,11 @@ If all checks and tests PASSED: close this step, proceed to merge-push.
 
 If any check or test FAILED:
 
-Read the current branch and target again:
+Read the current branch, target, and source remote again:
 ```bash
 BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
+SOURCE_REMOTE=$(gc bd show $WORK --json | jq -r '.[0].metadata.source_remote // "origin"')
 ```
 
 1. Diagnose: branch regression or pre-existing on target?
@@ -276,7 +308,7 @@ TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_bran
        --set-metadata rejection_reason="<failure summary>" \
        --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{binding_prefix}}polecat"
      ```
-   - Delete branch: `git push origin --delete $BRANCH`
+   - Delete branch: `git push "$SOURCE_REMOTE" --delete $BRANCH`
    - Clean up: `git checkout "$TARGET" && git branch -D temp`
    - Pour next patrol iteration before burning:
      ```bash
@@ -314,12 +346,30 @@ BRANCH=$(gc bd show $WORK --json | jq -r '.[0].metadata.branch')
 TARGET=$(gc bd show $WORK --json | jq -r '.[0].metadata.target // "{{target_branch}}"')
 MERGE_STRATEGY=$(gc bd show $WORK --json | jq -r '.[0].metadata.merge_strategy // "direct"')
 EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')
+SOURCE_REMOTE=$(gc bd show $WORK --json | jq -r '.[0].metadata.source_remote // "origin"')
 ORIGIN_REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
+# The pull request's head repo: `origin` for a same-repo branch, the
+# fork for a fork-based branch. Used to validate PRs and to address the
+# cross-repo `gh pr create --head`.
+EXPECTED_HEAD_REPO="$ORIGIN_REPO"
+if [ "$SOURCE_REMOTE" != "origin" ]; then
+  REMOTE_URL=$(git remote get-url "$SOURCE_REMOTE")
+  REMOTE_URL=${REMOTE_URL%.git}
+  REMOTE_URL=${REMOTE_URL#*github.com}
+  EXPECTED_HEAD_REPO=${REMOTE_URL#[:/]}
+fi
 if [ "$MERGE_STRATEGY" = "pr" ]; then
   MERGE_STRATEGY="mr"
 fi
 if [ -n "$EXISTING_PR" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
   echo "metadata.existing_pr requires pull-request handoff; using merge_strategy=mr."
+  MERGE_STRATEGY="mr"
+fi
+# A fork-based branch cannot be landed directly — the refinery has no
+# push access to origin's target branch. Force the pull-request handoff;
+# fork-based branches use the pull-request handoff, never a direct merge.
+if [ "$SOURCE_REMOTE" != "origin" ] && [ "$MERGE_STRATEGY" = "direct" ]; then
+  echo "Branch lives on $SOURCE_REMOTE, not origin; using merge_strategy=mr."
   MERGE_STRATEGY="mr"
 fi
 
@@ -401,8 +451,8 @@ if [ "$MERGE_STRATEGY" = "mr" ] && [ -n "$EXISTING_PR" ]; then
   if [ "$EXISTING_PR_REPO" != "$ORIGIN_REPO" ]; then
     block_existing_pr "Existing PR $EXISTING_PR belongs to repo $EXISTING_PR_REPO, want $ORIGIN_REPO."
   fi
-  if [ "$EXISTING_PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO."
+  if [ "$EXISTING_PR_HEAD_REPO" != "$EXPECTED_HEAD_REPO" ]; then
+    block_existing_pr "Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $EXPECTED_HEAD_REPO."
   fi
 fi
 ```
@@ -457,10 +507,10 @@ If delete_merged_branches = "true": `git push origin --delete $BRANCH`
 Refinery does NOT land the branch directly. Instead it publishes a pull
 request and treats PR creation as the terminal handoff for this work bead.
 
-**1. Push the rebased branch back to origin:**
+**1. Push the rebased branch back to its source remote:**
 ```bash
 git checkout temp
-git push origin HEAD:$BRANCH --force-with-lease
+git push "$SOURCE_REMOTE" HEAD:$BRANCH --force-with-lease
 ```
 If `--force-with-lease` fails, the existing PR branch moved after your
 fetch. STOP, fetch the latest branch, rebase your temp branch again, and
@@ -484,6 +534,22 @@ EOF
 
 if [ -n "$EXISTING_PR" ]; then
   PR_REF="$EXISTING_PR"
+elif [ "$SOURCE_REMOTE" != "origin" ]; then
+  # Fork-based branch: open a cross-repo pull request from the fork.
+  # The head ref is `<fork-owner>:<branch>`; the base repo stays origin.
+  PR_URL=$(gh pr create \
+    --base "$TARGET" \
+    --head "${EXPECTED_HEAD_REPO%%/*}:$BRANCH" \
+    --title "$ISSUE_TITLE ($WORK)" \
+    --body "$PR_BODY" 2>/dev/null || true)
+
+  if [ -z "$PR_URL" ]; then
+    PR_URL=$(gh pr list --state open --base "$TARGET" --head "$BRANCH" \
+      --json url,headRepositoryOwner \
+      | jq -r --arg owner "${EXPECTED_HEAD_REPO%%/*}" \
+        'map(select(.headRepositoryOwner.login == $owner)) | .[0].url // empty')
+  fi
+  PR_REF="$PR_URL"
 else
   PR_URL=$(gh pr create \
     --base "$TARGET" \
@@ -554,11 +620,11 @@ if [ "$PR_REPO" != "$ORIGIN_REPO" ]; then
   gc runtime drain-ack
   exit 1
 fi
-if [ "$PR_HEAD_REPO" != "$ORIGIN_REPO" ]; then
+if [ "$PR_HEAD_REPO" != "$EXPECTED_HEAD_REPO" ]; then
   if [ -n "$EXISTING_PR" ]; then
-    block_existing_pr "Existing PR $EXISTING_PR head repo $PR_HEAD_REPO, want $ORIGIN_REPO."
+    block_existing_pr "Existing PR $EXISTING_PR head repo $PR_HEAD_REPO, want $EXPECTED_HEAD_REPO."
   fi
-  echo "Pull request $PR_REF head repo $PR_HEAD_REPO, want $ORIGIN_REPO."
+  echo "Pull request $PR_REF head repo $PR_HEAD_REPO, want $EXPECTED_HEAD_REPO."
   gc runtime drain-ack
   exit 1
 fi

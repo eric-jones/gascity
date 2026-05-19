@@ -98,6 +98,8 @@ Polecats set these metadata fields before assigning a work bead to you:
 - `target` — target branch (optional, defaults to {{ .DefaultBranch }})
 - `merge_strategy` — handoff mode (optional, defaults to `direct`)
 - `existing_pr` — existing PR URL to reuse in `mr` / `pr` mode
+- `remote` — git remote hosting the branch (optional, defaults to
+  `origin`; a fork-based branch lives on a fork remote, e.g. `fork`)
 
 Read them mechanically:
 ```bash
@@ -145,9 +147,16 @@ In `mr` mode, this pack treats PR creation as the terminal handoff for the
 direct-bead workflow. Record `pr_url` on the work bead, close the bead, and
 leave the source branch intact for the PR lifecycle.
 
+A branch on a fork remote rather than `origin` is fork-based: the refinery
+cannot land it directly, so the formula forces the `mr` handoff and opens
+a cross-repo pull request from the fork. The PR's head repo is the fork;
+its base repo is still `origin`. The formula resolves the branch's remote
+from `metadata.remote` (defaulting to `fork` for a branch absent from
+`origin`) and records it as `metadata.source_remote`.
+
 In `mr` / `pr` mode, if `metadata.existing_pr` is set, reuse that PR URL.
 Do not call `gh pr create` for the work bead. Before pushing or closing
-the bead, verify `gh pr view` reports an open same-repository PR whose
+the bead, verify `gh pr view` reports an open PR whose
 `headRefName` equals `metadata.branch` and whose `baseRefName` equals
 `metadata.target`; then record the canonical PR URL as `pr_url` and close
 the bead when the branch has been pushed. If validation fails, record a

@@ -472,7 +472,7 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 		`Existing PR $EXISTING_PR targets branch $EXISTING_PR_HEAD, want $BRANCH`,
 		`Existing PR $EXISTING_PR targets base $EXISTING_PR_BASE, want $TARGET`,
 		`Existing PR $EXISTING_PR belongs to repo $EXISTING_PR_REPO, want $ORIGIN_REPO`,
-		`Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $ORIGIN_REPO`,
+		`Existing PR $EXISTING_PR head repo $EXISTING_PR_HEAD_REPO, want $EXPECTED_HEAD_REPO`,
 		`PR_REF="$EXISTING_PR"`,
 		`PR_STATUS=$?`,
 		`if [ -n "$EXISTING_PR" ] && pr_lookup_missing "$PR_ERROR"; then`,
@@ -487,9 +487,80 @@ func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
 	assertContainsInOrder(t, body,
 		`EXISTING_PR=$(gc bd show $WORK --json | jq -r '.[0].metadata.existing_pr // empty')`,
 		`EXISTING_PR_INFO=$(gh pr view --json url,number,state,headRefName,baseRefName,headRepositoryOwner,headRepository -- "$EXISTING_PR" 2>"$EXISTING_PR_ERR")`,
-		`git push origin HEAD:$BRANCH --force-with-lease`,
+		`git push "$SOURCE_REMOTE" HEAD:$BRANCH --force-with-lease`,
 		`gh pr create`,
 	)
+}
+
+// TestRefineryFormulaHandlesForkBasedBranches guards the fork-PR merge
+// path added for gc-rm0ha.40: a gascity-rig incident where work beads
+// whose branch lived only on a fork sat unprocessable for 1-2 days. The
+// refinery formula assumed every branch was on `origin` and that a
+// `direct` merge could push to origin's target — for an upstream rig
+// that would push unreviewed commits to a public repo. The formula now
+// resolves the branch's source remote, records it on the work bead,
+// forces the `mr` handoff for fork-based branches, and opens a
+// cross-repo pull request from the fork.
+func TestRefineryFormulaHandlesForkBasedBranches(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-refinery-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery formula: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		// rebase: detect a fork-based branch and record its remote.
+		`git ls-remote --exit-code --heads origin "$BRANCH"`,
+		`SOURCE_REMOTE=$(gc bd show $WORK --json | jq -r '.[0].metadata.remote // "fork"')`,
+		`gc bd update $WORK --set-metadata source_remote="$SOURCE_REMOTE"`,
+		`git checkout -b temp "$SOURCE_REMOTE/$BRANCH"`,
+		// merge-push: reuse the recorded remote, force the PR handoff.
+		`SOURCE_REMOTE=$(gc bd show $WORK --json | jq -r '.[0].metadata.source_remote // "origin"')`,
+		`fork-based branches use the pull-request handoff`,
+		// merge-push: push to the fork and open a cross-repo PR.
+		`git push "$SOURCE_REMOTE" HEAD:$BRANCH --force-with-lease`,
+		`--head "${EXPECTED_HEAD_REPO%%/*}:$BRANCH"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery formula missing fork-PR handling %q", want)
+		}
+	}
+	// The fork path runs in order: resolve the recorded remote, derive
+	// the PR head repo, force `mr`, push to the fork, open the PR.
+	assertContainsInOrder(t, body,
+		`SOURCE_REMOTE=$(gc bd show $WORK --json | jq -r '.[0].metadata.source_remote // "origin"')`,
+		`EXPECTED_HEAD_REPO="$ORIGIN_REPO"`,
+		`fork-based branches use the pull-request handoff`,
+		`git push "$SOURCE_REMOTE" HEAD:$BRANCH --force-with-lease`,
+		`--head "${EXPECTED_HEAD_REPO%%/*}:$BRANCH"`,
+	)
+}
+
+// TestRefineryPromptDocumentsForkBasedBranches keeps the refinery prompt
+// consistent with the fork-PR merge path in mol-refinery-patrol: the
+// prompt must describe the cross-repo handoff and must not claim the
+// refinery only handles same-repository PRs (the stale assertion that
+// predated the gc-rm0ha.40 fix).
+func TestRefineryPromptDocumentsForkBasedBranches(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "refinery", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading refinery prompt: %v", err)
+	}
+	body := string(data)
+	for _, want := range []string{
+		"`remote` — git remote hosting the branch",
+		"cross-repo pull request from the fork",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("refinery prompt missing fork-PR documentation %q", want)
+		}
+	}
+	if strings.Contains(body, "same-repository PR") {
+		t.Errorf("refinery prompt still claims same-repository-only PRs; the fork-PR path opens cross-repo PRs")
+	}
 }
 
 func TestWorktreeSetupKeepsIgnoresLocal(t *testing.T) {
