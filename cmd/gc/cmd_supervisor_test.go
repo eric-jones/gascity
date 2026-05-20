@@ -4466,10 +4466,13 @@ func TestSupervisorSignalLoopKeepsLateDestructiveEscalationUntilShutdownDone(t *
 	var shutdownStartedOnce sync.Once
 	ctl := newSupervisorShutdownController()
 
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
-		ctl.request(mode)
-		shutdownStartedOnce.Do(func() { close(shutdownStarted) })
-	}, func() {})
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) bool {
+		repeatedDestructive := ctl.request(mode)
+		if !repeatedDestructive {
+			shutdownStartedOnce.Do(func() { close(shutdownStarted) })
+		}
+		return repeatedDestructive
+	}, func() {}, io.Discard)
 
 	sigCh <- syscall.SIGTERM
 	select {
@@ -4496,10 +4499,11 @@ func TestSupervisorSignalLoopRecordsSignalAttribution(t *testing.T) {
 
 	gotMode := make(chan supervisorShutdownMode, 1)
 	gotTrigger := make(chan shutdownTrigger, 1)
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, trigger shutdownTrigger) {
+	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
 		gotMode <- mode
 		gotTrigger <- trigger
-	}, func() {})
+		return false
+	}, func() {}, io.Discard)
 
 	sigCh <- syscall.SIGTERM
 	select {
@@ -4603,9 +4607,10 @@ func TestHandleSupervisorConnStopRecordsSocketAttribution(t *testing.T) {
 	handlerDone := make(chan struct{})
 	go func() {
 		defer close(handlerDone)
-		handleSupervisorConn(server, func(mode supervisorShutdownMode, trigger shutdownTrigger) {
+		handleSupervisorConn(server, func(mode supervisorShutdownMode, trigger shutdownTrigger) bool {
 			gotMode <- mode
 			gotTrigger <- trigger
+			return false
 		}, nil, nil)
 	}()
 
@@ -4679,7 +4684,7 @@ func installHardExitHook(t *testing.T) <-chan int {
 	t.Helper()
 	calls := make(chan int, 1)
 	prev := supervisorHardExit
-	supervisorHardExit = func(code int) {
+	supervisorHardExit = func(_ io.Writer, code int) {
 		select {
 		case calls <- code:
 		default:
@@ -4689,16 +4694,25 @@ func installHardExitHook(t *testing.T) <-chan int {
 	return calls
 }
 
+func recordingShutdownRequester(ctl *supervisorShutdownController, shutdowns chan<- supervisorShutdownMode) func(supervisorShutdownMode, shutdownTrigger) bool {
+	return func(mode supervisorShutdownMode, _ shutdownTrigger) bool {
+		repeatedDestructive := ctl.request(mode)
+		if !repeatedDestructive {
+			shutdowns <- mode
+		}
+		return repeatedDestructive
+	}
+}
+
 func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
 	hardExitCalls := installHardExitHook(t)
 
 	sigCh := make(chan os.Signal, 2)
 	done := make(chan struct{})
 	shutdowns := make(chan supervisorShutdownMode, 4)
+	ctl := newSupervisorShutdownController()
 
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
-		shutdowns <- mode
-	}, func() {})
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {}, io.Discard)
 	defer close(done)
 
 	sigCh <- syscall.SIGTERM
@@ -4719,8 +4733,8 @@ func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
 	sigCh <- syscall.SIGTERM
 	select {
 	case code := <-hardExitCalls:
-		if code != supervisorHardExitCodeSecondSignal {
-			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeSecondSignal)
+		if code != supervisorHardExitCodeRepeatedShutdown {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("second SIGTERM did not trigger hard exit")
@@ -4732,6 +4746,34 @@ func TestSupervisorSignalLoopHardExitsOnSecondDestructiveSignal(t *testing.T) {
 	}
 }
 
+func TestSupervisorSignalLoopHardExitsAfterSocketShutdownThenDestructiveSignal(t *testing.T) {
+	hardExitCalls := installHardExitHook(t)
+	ctl := newSupervisorShutdownController()
+	ctl.request(supervisorShutdownDestructive)
+
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	shutdowns := make(chan supervisorShutdownMode, 1)
+
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {}, io.Discard)
+	defer close(done)
+
+	sigCh <- syscall.SIGTERM
+	select {
+	case code := <-hardExitCalls:
+		if code != supervisorHardExitCodeRepeatedShutdown {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SIGTERM after socket shutdown did not trigger hard exit")
+	}
+	select {
+	case mode := <-shutdowns:
+		t.Fatalf("SIGTERM after socket shutdown should hard-exit before calling requestShutdown; got mode %v", mode)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
 func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *testing.T) {
 	t.Setenv(supervisorPreserveSessionsOnSignalEnv, "1")
 	hardExitCalls := installHardExitHook(t)
@@ -4739,10 +4781,9 @@ func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *te
 	sigCh := make(chan os.Signal, 3)
 	done := make(chan struct{})
 	shutdowns := make(chan supervisorShutdownMode, 4)
+	ctl := newSupervisorShutdownController()
 
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
-		shutdowns <- mode
-	}, func() {})
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {}, io.Discard)
 	defer close(done)
 
 	sigCh <- syscall.SIGTERM
@@ -4773,8 +4814,8 @@ func TestSupervisorSignalLoopHardExitsOnDestructiveAfterPreserveEscalation(t *te
 	sigCh <- syscall.SIGINT
 	select {
 	case code := <-hardExitCalls:
-		if code != supervisorHardExitCodeSecondSignal {
-			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeSecondSignal)
+		if code != supervisorHardExitCodeRepeatedShutdown {
+			t.Fatalf("hard exit code = %d, want %d", code, supervisorHardExitCodeRepeatedShutdown)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("second destructive signal after escalation did not trigger hard exit")
@@ -4788,12 +4829,11 @@ func TestSupervisorSignalLoopSIGHUPDoesNotCountTowardHardExit(t *testing.T) {
 	done := make(chan struct{})
 	shutdowns := make(chan supervisorShutdownMode, 4)
 	reconciles := make(chan struct{}, 4)
+	ctl := newSupervisorShutdownController()
 
-	go supervisorSignalLoop(sigCh, done, func(mode supervisorShutdownMode, _ shutdownTrigger) {
-		shutdowns <- mode
-	}, func() {
+	go supervisorSignalLoop(sigCh, done, recordingShutdownRequester(ctl, shutdowns), func() {
 		reconciles <- struct{}{}
-	})
+	}, io.Discard)
 	defer close(done)
 
 	sigCh <- syscall.SIGHUP
