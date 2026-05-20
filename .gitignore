@@ -47,3 +47,9 @@ reports/
 tmp_*.diff
 tmp_*.patch
 issues.jsonl
+
+# Gas City
+.beads/*
+!.beads/config.yaml
+!.beads/metadata.json
+!.beads/identity.toml
