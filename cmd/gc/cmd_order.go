@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -168,23 +169,31 @@ name. Use --rig to filter by rig.`,
 
 func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	staleAfter := defaultOrderTrackingSweepStaleAfter
+	includeWisps := false
 	quiet := false
 	cmd := &cobra.Command{
-		Use:   "sweep-tracking",
+		Use:   "sweep-tracking [order ...]",
 		Short: "Close stale order-tracking beads",
 		Long: `Close stale open order-tracking beads.
 
 This is intended for maintenance exec orders. It only closes tracking beads
-older than --stale-after so a fresh in-flight order is not interrupted.`,
-		Args: cobra.NoArgs,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdOrderSweepTracking(staleAfter, quiet, stdout, stderr) != 0 {
+older than --stale-after so a fresh in-flight order is not interrupted.
+
+Use --include-wisps for operator recovery of abandoned order-run wisp
+subtrees whose open descendants are also older than --stale-after. Pass one
+or more scoped order names when --include-wisps is set; wisp recovery is
+order-scoped to avoid scanning unrelated beads.`,
+		Args: cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdOrderSweepTracking(staleAfter, includeWisps, quiet, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
+		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
 	return cmd
 }
@@ -986,7 +995,7 @@ func doOrderHistoryWithStoresResolver(name, rig string, aa []orders.Order, resol
 
 // --- gc order sweep-tracking ---
 
-func cmdOrderSweepTracking(staleAfter time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepTracking(staleAfter time.Duration, includeWisps, quiet bool, orderNames []string, stdout, stderr io.Writer) int {
 	if staleAfter <= 0 {
 		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
 		return 1
@@ -1001,15 +1010,37 @@ func cmdOrderSweepTracking(staleAfter time.Duration, quiet bool, stdout, stderr 
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	closed, err := sweepStaleOrderTracking(store, time.Now(), staleAfter, nil, orderTrackingSweepMetadataInitiator)
+	result, err := sweepStaleOrderTrackingWithOptions(store, time.Now(), staleAfter, orderNameFilter(orderNames), orderTrackingSweepMetadataInitiator, includeWisps)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !quiet {
-		fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", closed) //nolint:errcheck // best-effort stdout
+		if includeWisps {
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s), %d stale order wisp bead(s)\n", result.trackingClosed, result.wispClosed) //nolint:errcheck // best-effort stdout
+		} else {
+			fmt.Fprintf(stdout, "closed %d stale order-tracking bead(s)\n", result.trackingClosed) //nolint:errcheck // best-effort stdout
+		}
 	}
 	return 0
+}
+
+func orderNameFilter(orderNames []string) map[string]struct{} {
+	if len(orderNames) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(orderNames))
+	for _, name := range orderNames {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		out[name] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // findOrder looks up an order by name and optional rig.
