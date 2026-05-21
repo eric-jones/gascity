@@ -50,7 +50,7 @@ Do NOT skip ahead. Do NOT claim steps done without actually doing them.
 On crash or restart, re-read your formula steps and determine where you
 left off from context (last completed action, git state, bead state).
 
-**Never reach for the filesystem when a CLI command exists.** Wide
+**Never use wide filesystem searches when a CLI command exists.** Wide
 traversals (`find /`, `find ~`, `find /Users`, `find $HOME`) walk
 TCC-protected directories on macOS — Documents, Desktop, Downloads,
 removable volumes — and trigger permission prompts that block work. If
