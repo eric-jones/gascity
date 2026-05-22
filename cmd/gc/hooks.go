@@ -53,6 +53,9 @@ HOOK_LOG="${BEADS_DIR:-.beads}/hooks.log"
 DATA=$(cat)
 PAYLOAD=$(printf '{"bead":%%s}' "$DATA")
 title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
+# Tag subprocess bd calls so the bd-trace can attribute them to the
+# hook cascade (best-effort; ignored when GC_BD_TRACE is unset).
+export GC_BD_TRACE_SCOPE="hook:%[2]s"
 (
   "$GC_BIN" event emit %[2]s --subject "$1" --message "$title" --payload "$PAYLOAD" 2>>"$HOOK_LOG" \
     || echo "[$(date -u +%%FT%%TZ)] %[3]s $1: gc event emit %[2]s failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
@@ -94,6 +97,9 @@ HOOK_LOG="${BEADS_DIR:-.beads}/hooks.log"
 DATA=$(cat)
 PAYLOAD=$(printf '{"bead":%%s}' "$DATA")
 title=$(echo "$DATA" | grep -o '"title":"[^"]*"' | head -1 | cut -d'"' -f4)
+# Tag subprocess bd calls so the bd-trace can attribute them to the
+# hook cascade (best-effort; ignored when GC_BD_TRACE is unset).
+export GC_BD_TRACE_SCOPE="hook:bead.closed"
 (
   "$GC_BIN" event emit bead.closed --subject "$1" --message "$title" --payload "$PAYLOAD" 2>>"$HOOK_LOG" \
     || echo "[$(date -u +%%FT%%TZ)] on_close $1: gc event emit bead.closed failed (gc=$GC_BIN)" >>"$HOOK_LOG" 2>/dev/null \
