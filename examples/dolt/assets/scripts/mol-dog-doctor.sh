@@ -76,6 +76,7 @@ append_backup_stale() {
 PROBE_START=$(date +%s)
 if ! dolt_sql -q "SELECT active_branch()" >/dev/null 2>&1; then
     gc mail send mayor/ \
+        --from controller \
         -s "ESCALATION: Dolt server unreachable on port $PORT [CRITICAL]" \
         -m "Doctor probe failed: server did not respond to active_branch() query." \
         2>/dev/null || true
@@ -159,6 +160,7 @@ fi
 WARNINGS="${LATENCY_WARN}${CONN_WARN}${ORPHAN_WARN}${BACKUP_STALE}"
 if [ -n "$WARNINGS" ]; then
     gc mail send mayor/ \
+        --from controller \
         -s "Dolt health advisory [MEDIUM]" \
         -m "Latency: ${LATENCY_S}s${LATENCY_WARN}
 Connections: ${CONN_COUNT}/${CONN_MAX}${CONN_WARN}

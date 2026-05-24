@@ -3032,3 +3032,91 @@ exit 0
 		t.Fatalf("fresh prod_dev backup should not be reported stale, log:\n%s", gcLog)
 	}
 }
+
+// TestDoctorScriptAdvisoryMailCarriesExplicitSenderIdentity asserts the
+// latency-WARN advisory mail path passes `--from controller` so the message
+// is attributed to the controller-spawned exec order instead of falling
+// back to "human" (the documented default when $GC_ALIAS / $GC_AGENT are
+// unset, which is the case for controller-spawned exec orders).
+func TestDoctorScriptAdvisoryMailCarriesExplicitSenderIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+set -euo pipefail
+case "$*" in
+  *"SELECT active_branch()"*)
+    printf 'active_branch()\nmain\n'
+    exit 0
+    ;;
+  *"COUNT(*) FROM information_schema.PROCESSLIST"*)
+    printf 'COUNT(*)\n1\n'
+    exit 0
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\n'
+    exit 0
+    ;;
+esac
+exit 0
+`)
+
+	// LATENCY_WARN_S=0 makes the latency check fire on every run because
+	// PROBE_END - PROBE_START >= 0 always. That guarantees the advisory
+	// mail path executes regardless of probe duration.
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir, "GC_DOCTOR_LATENCY_WARN_S=0")
+	if !strings.Contains(out, "server: ok") {
+		t.Fatalf("doctor should report server ok when probe succeeds, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "Dolt health advisory") {
+		t.Fatalf("advisory mail did not fire; latency-WARN should have triggered, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "--from controller") {
+		t.Fatalf("advisory mail must pass --from controller so it is not attributed to 'human', log:\n%s", gcLog)
+	}
+}
+
+// TestDoctorScriptUnreachableEscalationCarriesExplicitSenderIdentity asserts
+// the server-unreachable ESCALATION mail path also passes `--from controller`.
+// Both advisory call sites share the same failure mode (defaulting to "human")
+// when the controller-spawned script runs without $GC_ALIAS / $GC_AGENT set,
+// so both need the regression check.
+func TestDoctorScriptUnreachableEscalationCarriesExplicitSenderIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	// Fake dolt fails the active_branch() probe, which forces the script
+	// down the unreachable-server ESCALATION branch.
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
+exit 1
+`)
+
+	out := runDogScript(t, "mol-dog-doctor.sh", binDir, cityPath, dataDir)
+	if !strings.Contains(out, "server unreachable") {
+		t.Fatalf("doctor should report server unreachable when probe fails, output:\n%s", out)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "ESCALATION: Dolt server unreachable") {
+		t.Fatalf("unreachable escalation mail did not fire, log:\n%s", gcLog)
+	}
+	if !strings.Contains(string(gcLog), "--from controller") {
+		t.Fatalf("unreachable escalation mail must pass --from controller so it is not attributed to 'human', log:\n%s", gcLog)
+	}
+}
