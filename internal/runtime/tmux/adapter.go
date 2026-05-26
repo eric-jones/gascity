@@ -806,7 +806,16 @@ func doStartSession(ctx context.Context, ops startOps, name string, cfg runtime.
 			ReadyDelayMs:      cfg.ReadyDelayMs,
 			ProcessNames:      cfg.ProcessNames,
 		}}
-		_ = ops.waitForReady(ctx, name, rc, 60*time.Second) // best-effort
+		// Readiness is best-effort EXCEPT for an observed process death: if the
+		// pane exited before readiness (e.g. a resume into a stale session key,
+		// kept visible by remain-on-exit), surface ErrSessionDiedDuringStartup so
+		// the caller retries with a fresh start. Otherwise the wait burns the full
+		// startup timeout and the parent deadline propagates as a generic "context
+		// deadline exceeded", stranding this session — and everything depending on
+		// it — tick after tick (bead tr-xg70y).
+		if err := ops.waitForReady(ctx, name, rc, 60*time.Second); errors.Is(err, errRuntimeDiedDuringReady) {
+			return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}

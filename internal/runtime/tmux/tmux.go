@@ -2467,6 +2467,45 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 		return nil
 	}
 
+	return awaitRuntimeReady(ctx, timeout, rc.Tmux.ReadyPromptPrefix,
+		// Claude-style full-screen UIs often leave the prompt above a footer of
+		// blank lines, so capture a wide window rather than just the last rows.
+		func() ([]string, error) { return t.CapturePaneLines(session, promptObservationLines) },
+		func() (bool, error) { return t.IsPaneDead(session) },
+	)
+}
+
+// readyPromptPollInterval is the delay between successive readiness polls.
+const readyPromptPollInterval = 200 * time.Millisecond
+
+// errRuntimeDiedDuringReady signals that the agent's pane exited (pane_dead)
+// while waiting for its ready prompt — typically a resume into a stale session
+// key whose corpse remain-on-exit keeps visible. doStartSession maps it to
+// runtime.ErrSessionDiedDuringStartup so the session restarts fresh. Without
+// this signal the readiness wait polls to the full startup timeout, which
+// surfaced only as a generic "context deadline exceeded" and stranded the
+// session — and every session that depended on it — tick after tick
+// (gastownhall/gascity, bead tr-xg70y).
+var errRuntimeDiedDuringReady = errors.New("runtime process exited before readiness")
+
+// awaitRuntimeReady polls capture() for a line beginning with promptPrefix
+// until the prompt appears (returns nil), the pane dies
+// (errRuntimeDiedDuringReady), the timeout elapses (a timeout error), or ctx is
+// canceled (ctx error).
+//
+// paneDead is consulted every poll so a process that exits during startup is
+// detected promptly instead of after the full timeout. A paneDead probe error
+// is treated as non-fatal — the pane may briefly be unqueryable right after
+// launch — and polling continues; a prompt that appears later still wins. I/O
+// is injected via the capture and paneDead closures so the loop is unit
+// testable without a live tmux server.
+func awaitRuntimeReady(
+	ctx context.Context,
+	timeout time.Duration,
+	promptPrefix string,
+	capture func() ([]string, error),
+	paneDead func() (bool, error),
+) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		select {
@@ -2474,27 +2513,24 @@ func (t *Tmux) WaitForRuntimeReady(ctx context.Context, session string, rc *Runt
 			return ctx.Err()
 		default:
 		}
-		// Claude-style full-screen UIs often leave the prompt above a footer of
-		// blank lines, so the last 10 lines can miss a perfectly visible prompt.
-		lines, err := t.CapturePaneLines(session, promptObservationLines)
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(200 * time.Millisecond):
+		if lines, err := capture(); err == nil {
+			// Look for the runtime prompt indicator at the start of a line.
+			for _, line := range lines {
+				if matchesPromptPrefix(line, promptPrefix) {
+					return nil
+				}
 			}
-			continue
 		}
-		// Look for runtime prompt indicator at start of line
-		for _, line := range lines {
-			if matchesPromptPrefix(line, rc.Tmux.ReadyPromptPrefix) {
-				return nil
-			}
+		// A dead pane means the launched process exited before readiness.
+		// remain-on-exit keeps the corpse visible, so the prompt scan above
+		// can never succeed — fail fast rather than polling to the deadline.
+		if dead, err := paneDead(); err == nil && dead {
+			return errRuntimeDiedDuringReady
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(200 * time.Millisecond):
+		case <-time.After(readyPromptPollInterval):
 		}
 	}
 	return fmt.Errorf("timeout waiting for runtime prompt")

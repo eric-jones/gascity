@@ -381,6 +381,80 @@ func TestDoStartSession_ReturnsContextCanceledAfterBestEffortReadyWait(t *testin
 	})
 }
 
+// TestDoStartSession_PaneDeathDuringReadyReturnsSessionDied is the
+// doStartSession-level half of the tr-xg70y fix. When the readiness wait
+// reports that the agent's pane exited before becoming ready (a resume into a
+// stale session key, kept visible by remain-on-exit), doStartSession must
+// surface runtime.ErrSessionDiedDuringStartup so callers retry with a fresh
+// start. hasSessionResult is true because the remain-on-exit corpse keeps the
+// tmux session present — the very condition that previously masked the death
+// at the Step 5 hasSession check and let the start "succeed" into a dead pane.
+func TestDoStartSession_PaneDeathDuringReadyReturnsSessionDied(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		waitReadyErr:     errRuntimeDiedDuringReady,
+	}
+
+	cfg := runtime.Config{
+		WorkDir:                "/proj",
+		Command:                "claude --resume stale-key",
+		ReadyPromptPrefix:      "❯ ",
+		ReadyDelayMs:           10000,
+		ProcessNames:           []string{"node", "claude"},
+		EmitsPermissionWarning: true,
+	}
+
+	err := doStartSession(context.Background(), ops, "gc-city-boot", cfg, DefaultConfig().SetupTimeout)
+	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+		t.Fatalf("err = %v, want runtime.ErrSessionDiedDuringStartup", err)
+	}
+
+	// Death is fatal at the readiness step: we must not proceed to the
+	// hasSession/session-setup path that the corpse would otherwise satisfy.
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+	})
+}
+
+// TestDoStartSession_NonDeathReadyErrorStaysBestEffort guards the blast radius
+// of the tr-xg70y fix: only an observed pane death is fatal. A plain readiness
+// timeout (or any other waitForReady error) remains best-effort — the session
+// may still be coming up, so doStartSession proceeds to the hasSession check
+// exactly as before.
+func TestDoStartSession_NonDeathReadyErrorStaysBestEffort(t *testing.T) {
+	ops := &fakeStartOps{
+		hasSessionResult: true,
+		waitReadyErr:     errors.New("timeout waiting for runtime prompt"),
+	}
+
+	cfg := runtime.Config{
+		Command:                "claude",
+		ReadyPromptPrefix:      "❯ ",
+		ReadyDelayMs:           10000,
+		ProcessNames:           []string{"node", "claude"},
+		EmitsPermissionWarning: true,
+	}
+
+	err := doStartSession(context.Background(), ops, "gc-city-boot", cfg, DefaultConfig().SetupTimeout)
+	if err != nil {
+		t.Fatalf("err = %v, want nil (non-death ready error must stay best-effort)", err)
+	}
+
+	assertCallSequence(t, ops, []string{
+		"createSession",
+		"setRemainOnExit",
+		"waitForCommand",
+		"acceptStartupDialogs",
+		"waitForReady",
+		"acceptStartupDialogs",
+		"hasSession",
+	})
+}
+
 func TestDoStartSession_DoesNotRunSessionSetupAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	ops := &fakeStartOps{
