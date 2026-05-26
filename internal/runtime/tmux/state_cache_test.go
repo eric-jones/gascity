@@ -427,19 +427,6 @@ func TestFetchProcessSnapshotCanceledContextReturnsError(t *testing.T) {
 }
 
 func TestParseProcessSnapshotLineFixedColumns(t *testing.T) {
-	line := fmt.Sprintf("%10s %10s %-64s %s", "123", "1", "claude code", "claude code --print")
-	got, ok := parseProcessSnapshotLineFixedColumns(line)
-	if !ok {
-		t.Fatal("parseProcessSnapshotLineFixedColumns returned ok=false")
-	}
-	if got.PID != "123" || got.PPID != "1" || got.Command != "claude code" || got.Args != "claude code --print" {
-		t.Fatalf("parseProcessSnapshotLineFixedColumns = %+v, want fixed-column fields preserved", got)
-	}
-}
-
-func TestParseProcessSnapshotLineWhitespace(t *testing.T) {
-	// macOS `ps -eo pid=,ppid=,comm=,args=` output: right-aligned numeric
-	// columns, comm separated from args by whitespace.
 	cases := []struct {
 		name     string
 		line     string
@@ -449,33 +436,30 @@ func TestParseProcessSnapshotLineWhitespace(t *testing.T) {
 		wantArgs string
 	}{
 		{
-			name:     "typical 4-token line",
-			line:     "  123     1 /sbin/launchd    /sbin/launchd --boot",
+			name:     "typical line",
+			line:     fmt.Sprintf("%10s %10s %-64s %s", "123", "1", "claude code", "claude code --print"),
 			wantPID:  "123",
 			wantPPID: "1",
-			wantCmd:  "/sbin/launchd",
-			wantArgs: "/sbin/launchd --boot",
+			wantCmd:  "claude code",
+			wantArgs: "claude code --print",
 		},
 		{
-			name:     "args has multiple spaces preserved",
-			line:     "456 1 claude claude code --print --json",
+			// Linux comm can also contain internal whitespace —
+			// applications can set thread names via prctl(PR_SET_NAME)
+			// to strings like "Renderer Main" or "I/O Worker". The
+			// fixed-column slice preserves them; a whitespace
+			// tokenizer would not.
+			name:     "comm with internal spaces (PR_SET_NAME style)",
+			line:     fmt.Sprintf("%10s %10s %-64s %s", "456", "1", "Renderer Main", "/opt/app/bin/renderer --headless"),
 			wantPID:  "456",
 			wantPPID: "1",
-			wantCmd:  "claude",
-			wantArgs: "claude code --print --json",
-		},
-		{
-			name:     "no args (3-token line)",
-			line:     "789 1 kernel_task",
-			wantPID:  "789",
-			wantPPID: "1",
-			wantCmd:  "kernel_task",
-			wantArgs: "",
+			wantCmd:  "Renderer Main",
+			wantArgs: "/opt/app/bin/renderer --headless",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := parseProcessSnapshotLineWhitespace(tc.line)
+			got, ok := parseProcessSnapshotLineFixedColumns(tc.line)
 			if !ok {
 				t.Fatalf("returned ok=false for %q", tc.line)
 			}
@@ -490,6 +474,115 @@ func TestParseProcessSnapshotLineWhitespace(t *testing.T) {
 			}
 			if got.Args != tc.wantArgs {
 				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseProcessSnapshotLineDarwin(t *testing.T) {
+	// Real macOS `ps -eo pid=,ppid=,comm=,args=` line layout:
+	// PID/PPID right-aligned in dynamic-width columns, COMM left-aligned
+	// in exactly 16 chars (MAXCOMLEN), single-space separators between
+	// columns, ARGS verbatim at the end.
+	cases := []struct {
+		name     string
+		line     string
+		wantPID  string
+		wantPPID string
+		wantCmd  string
+		wantArgs string
+	}{
+		{
+			name:     "comm shorter than column, padded",
+			line:     "  123     1 /sbin/launchd    /sbin/launchd --boot",
+			wantPID:  "123",
+			wantPPID: "1",
+			wantCmd:  "/sbin/launchd",
+			wantArgs: "/sbin/launchd --boot",
+		},
+		{
+			// Regression guard for the original bug surface
+			// (gascity#2442). BSD `ps -o comm=` emits the executable
+			// path truncated to MAXCOMLEN=16 — and audio-driver workers
+			// (and other long-name kernel actors) register with comm
+			// values whose first 16 chars CONTAIN spaces, e.g.
+			// "Core Audio Drive". A whitespace tokenizer would split
+			// such a value across Command and Args, breaking name
+			// matching downstream. Fixed-width slicing is the fix.
+			name:     "comm with internal spaces — REGRESSION GUARD",
+			line:     "  489     1 Core Audio Drive Core Audio Driver (MSTeamsAudioDevice.driver)",
+			wantPID:  "489",
+			wantPPID: "1",
+			wantCmd:  "Core Audio Drive",
+			wantArgs: "Core Audio Driver (MSTeamsAudioDevice.driver)",
+		},
+		{
+			name:     "comm exactly fills the 16-char column",
+			line:     "  147     1 /System/Library/ /System/Library/PrivateFrameworks/X.framework/X",
+			wantPID:  "147",
+			wantPPID: "1",
+			wantCmd:  "/System/Library/",
+			wantArgs: "/System/Library/PrivateFrameworks/X.framework/X",
+		},
+		{
+			name:     "args preserves internal multi-space",
+			line:     "  456     1 claude           a  b   c",
+			wantPID:  "456",
+			wantPPID: "1",
+			wantCmd:  "claude",
+			wantArgs: "a  b   c",
+		},
+		{
+			// Real ps still pads comm to 16 chars even when args is
+			// effectively empty; the line ends right after the padding.
+			name:     "no args after padded comm",
+			line:     "  789     1 kernel_task     ",
+			wantPID:  "789",
+			wantPPID: "1",
+			wantCmd:  "kernel_task",
+			wantArgs: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := parseProcessSnapshotLineDarwin(tc.line)
+			if !ok {
+				t.Fatalf("returned ok=false for %q", tc.line)
+			}
+			if got.PID != tc.wantPID {
+				t.Errorf("PID = %q, want %q", got.PID, tc.wantPID)
+			}
+			if got.PPID != tc.wantPPID {
+				t.Errorf("PPID = %q, want %q", got.PPID, tc.wantPPID)
+			}
+			if got.Command != tc.wantCmd {
+				t.Errorf("Command = %q, want %q", got.Command, tc.wantCmd)
+			}
+			if got.Args != tc.wantArgs {
+				t.Errorf("Args = %q, want %q", got.Args, tc.wantArgs)
+			}
+		})
+	}
+}
+
+func TestParseProcessSnapshotLineDarwinRejectsMalformed(t *testing.T) {
+	// Inputs the parser must NOT accept — empty, too few columns to
+	// extract pid/ppid/comm. Returning ok=false lets the caller skip
+	// the row instead of recording garbage.
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"empty line", ""},
+		{"whitespace only", "       "},
+		{"pid only", "  123"},
+		{"pid and ppid only", "  123     1"},
+		{"pid, ppid, separator, no comm", "  123     1 "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := parseProcessSnapshotLineDarwin(tc.line); ok {
+				t.Errorf("expected ok=false for %q", tc.line)
 			}
 		})
 	}
