@@ -260,7 +260,9 @@ func assertScriptSourcesPortResolveOnce(t *testing.T, scriptPath string) {
 	if err != nil {
 		t.Fatalf("read %s: %v", scriptPath, err)
 	}
-	re := regexp.MustCompile(`(?m)^\.\s+.*port_resolve\.sh`)
+	// Allow leading indentation: dolt-target.sh sources port_resolve.sh inside
+	// its Dolt-backend branch (a MySQL-backed city skips Dolt port resolution).
+	re := regexp.MustCompile(`(?m)^\s*\.\s+.*port_resolve\.sh`)
 	matches := re.FindAllString(string(data), -1)
 	if len(matches) != 1 {
 		t.Fatalf("%s port_resolve.sh source count = %d, want 1\nmatches: %s", scriptPath, len(matches), strings.Join(matches, "\n"))
