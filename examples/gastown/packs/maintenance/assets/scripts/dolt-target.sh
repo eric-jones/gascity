@@ -29,6 +29,20 @@ read_runtime_state_string() (
     sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
 )
 
+# read_beads_config_value extracts a flat dotted scalar (e.g.
+# `mysql.server-port: 3306`) from a beads config.yaml. bd writes these
+# settings as flat `key: value` lines, not nested YAML, so a line-oriented
+# match is sufficient and avoids a YAML dependency in a POSIX sh script.
+read_beads_config_value() (
+    config_file="$1"
+    key="$2"
+    [ -f "$config_file" ] || return 0
+    # Escape the dots in the key so they match literally, then capture the
+    # value between the first and last non-space characters after the colon.
+    key_re=$(printf '%s' "$key" | sed 's/\./\\./g')
+    sed -n "s/^${key_re}:[[:space:]]*\\(.*[^[:space:]]\\)[[:space:]]*\$/\\1/p" "$config_file" 2>/dev/null | head -1 | tr -d '\r'
+)
+
 pid_is_running() (
     pid="$1"
 
@@ -142,43 +156,75 @@ managed_runtime_port() (
     printf '%s\n' "$port"
 )
 
-if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
-    DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
-else
-    DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
-    DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
-    DOLT_PROVIDER_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
-fi
+# Backend selection. The 2026-05-26 Dolt->MySQL cutover moved bead stores
+# onto a MySQL server; Dolt no longer runs, so resolving a managed Dolt
+# runtime port aborts (exit 78). A MySQL-backed city records the endpoint as
+# flat mysql.server-* keys in its beads config.yaml; when present, point the
+# SQL client at that endpoint instead of resolving a Dolt port. The dolt CLI
+# speaks the MySQL wire protocol, so dolt_sql() and its `-r csv` output are
+# identical whether the server is a dolt sql-server or mysqld — call sites
+# need no changes. GC_DOLT_* env vars still override either backend.
+BEADS_CONFIG_FILE="$GC_CITY_PATH/.beads/config.yaml"
+MYSQL_SERVER_PORT="$(read_beads_config_value "$BEADS_CONFIG_FILE" "mysql.server-port")"
 
-DOLT_PORT_RESOLVE_SCRIPT="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt/assets/scripts/port_resolve.sh"
-if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ] && [ -n "${SCRIPT_DIR:-}" ]; then
-    DOLT_SOURCE_SCRIPT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../dolt/assets/scripts" 2>/dev/null && pwd || true)
-    if [ -n "$DOLT_SOURCE_SCRIPT_DIR" ]; then
-        DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SOURCE_SCRIPT_DIR/port_resolve.sh"
+if [ -z "$MYSQL_SERVER_PORT" ]; then
+    MAINT_BACKEND="dolt"
+
+    if [ -n "${GC_DOLT_STATE_FILE:-}" ]; then
+        DOLT_STATE_FILE="$GC_DOLT_STATE_FILE"
+    else
+        DOLT_PACK_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}/packs/dolt"
+        DOLT_STATE_FILE="$DOLT_PACK_DIR/dolt-state.json"
+        DOLT_PROVIDER_STATE_FILE="$DOLT_PACK_DIR/dolt-provider-state.json"
     fi
-fi
-. "${DOLT_PORT_RESOLVE_SCRIPT:?port_resolve.sh not resolved}"
-if [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ]; then
-    GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+
+    DOLT_PORT_RESOLVE_SCRIPT="${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt/assets/scripts/port_resolve.sh"
+    if [ ! -f "$DOLT_PORT_RESOLVE_SCRIPT" ] && [ -n "${SCRIPT_DIR:-}" ]; then
+        DOLT_SOURCE_SCRIPT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../dolt/assets/scripts" 2>/dev/null && pwd || true)
+        if [ -n "$DOLT_SOURCE_SCRIPT_DIR" ]; then
+            DOLT_PORT_RESOLVE_SCRIPT="$DOLT_SOURCE_SCRIPT_DIR/port_resolve.sh"
+        fi
+    fi
+    . "${DOLT_PORT_RESOLVE_SCRIPT:?port_resolve.sh not resolved}"
+    if [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ]; then
+        GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+    else
+        GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+    fi
+
+    case "$GC_DOLT_PORT" in
+        ''|*[!0-9]*)
+            echo "maintenance: invalid GC_DOLT_PORT: $GC_DOLT_PORT" >&2
+            exit 1
+            ;;
+    esac
+
+    DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
+    DOLT_PORT="$GC_DOLT_PORT"
+    DOLT_USER="${GC_DOLT_USER:-root}"
+    DOLT_PASSWORD="${GC_DOLT_PASSWORD:-}"
 else
-    GC_DOLT_PORT="$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" "$GC_CITY_PATH")" || exit $?
+    MAINT_BACKEND="mysql"
+
+    DOLT_PORT="${GC_DOLT_PORT:-$MYSQL_SERVER_PORT}"
+    case "$DOLT_PORT" in
+        ''|*[!0-9]*)
+            echo "maintenance: invalid MySQL server port: $DOLT_PORT" >&2
+            exit 1
+            ;;
+    esac
+
+    DOLT_HOST="${GC_DOLT_HOST:-$(read_beads_config_value "$BEADS_CONFIG_FILE" "mysql.server-host")}"
+    DOLT_HOST="${DOLT_HOST:-127.0.0.1}"
+    DOLT_USER="${GC_DOLT_USER:-$(read_beads_config_value "$BEADS_CONFIG_FILE" "mysql.server-user")}"
+    DOLT_USER="${DOLT_USER:-root}"
+    DOLT_PASSWORD="${GC_DOLT_PASSWORD:-$(read_beads_config_value "$BEADS_CONFIG_FILE" "mysql.server-password")}"
 fi
-
-case "$GC_DOLT_PORT" in
-    ''|*[!0-9]*)
-        echo "maintenance: invalid GC_DOLT_PORT: $GC_DOLT_PORT" >&2
-        exit 1
-        ;;
-esac
-
-DOLT_HOST="${GC_DOLT_HOST:-127.0.0.1}"
-DOLT_PORT="$GC_DOLT_PORT"
-DOLT_USER="${GC_DOLT_USER:-root}"
 
 # Match the Dolt pack commands, which currently use non-TLS SQL connections.
 # If TLS becomes a supported GC_DOLT_* contract, add it in the Dolt pack first.
 dolt_sql() {
-    DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}" dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --no-tls sql "$@"
+    DOLT_CLI_PASSWORD="$DOLT_PASSWORD" dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --user "$DOLT_USER" --no-tls sql "$@"
 }
 
 # has_wisps_table reports whether $1 contains a `wisps` table. Maintenance
