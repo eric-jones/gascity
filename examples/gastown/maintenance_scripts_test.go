@@ -133,6 +133,94 @@ exit 0
 	}
 }
 
+func TestMaintenanceScriptsUseMySQLBackendTarget(t *testing.T) {
+	// After the 2026-05-26 Dolt->MySQL cutover a city records its bead-store
+	// endpoint as flat mysql.server-* keys in .beads/config.yaml. The
+	// maintenance scripts must route SQL to that endpoint instead of resolving
+	// a managed Dolt runtime port (which no longer exists, so resolution aborts
+	// with exit 78). With no Dolt state file and GC_DOLT_* blanked, a clean run
+	// proves the MySQL branch was taken; the dolt arg log proves the endpoint.
+	tests := []struct {
+		name   string
+		script string
+		env    map[string]string
+	}{
+		{
+			name:   "reaper",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "reaper.sh"),
+			env: map[string]string{
+				"GC_REAPER_DRY_RUN": "1",
+			},
+		},
+		{
+			name:   "jsonl export",
+			script: filepath.Join("packs", "maintenance", "assets", "scripts", "jsonl-export.sh"),
+			env: map[string]string{
+				"GC_JSONL_ARCHIVE_REPO":      "archive",
+				"GC_JSONL_MAX_PUSH_FAILURES": "99",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			binDir := t.TempDir()
+			stateDir := t.TempDir()
+			doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+			gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+			writeCityMySQLConfig(t, cityDir, "mysql.example.internal", "4506", "mysql-user", "gascity_hq")
+			writeMaintenanceDoltStub(t, filepath.Join(binDir, "dolt"))
+			writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+			env := map[string]string{
+				"DOLT_ARGS_LOG":     doltLog,
+				"GC_CALL_LOG":       gcLog,
+				"GC_CITY":           cityDir,
+				"GC_CITY_PATH":      cityDir,
+				"GC_PACK_STATE_DIR": stateDir,
+				// Blank the Dolt overrides so the MySQL config drives the target
+				// and no ambient GC_DOLT_* value leaks in through mergeTestEnv.
+				"GC_DOLT_HOST":        "",
+				"GC_DOLT_PORT":        "",
+				"GC_DOLT_USER":        "",
+				"GC_DOLT_PASSWORD":    "",
+				"GIT_CONFIG_GLOBAL":   filepath.Join(t.TempDir(), "gitconfig"),
+				"GIT_CONFIG_NOSYSTEM": "1",
+				"PATH":                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+			}
+			for key, value := range tt.env {
+				if key == "GC_JSONL_ARCHIVE_REPO" {
+					value = filepath.Join(cityDir, value)
+				}
+				env[key] = value
+			}
+
+			runScript(t, filepath.Join(exampleDir(), tt.script), env)
+
+			logData, err := os.ReadFile(doltLog)
+			if err != nil {
+				t.Fatalf("ReadFile(dolt log): %v", err)
+			}
+			log := string(logData)
+			for _, want := range []string{
+				"--host mysql.example.internal",
+				"--port 4506",
+				"--user mysql-user",
+				"--no-tls",
+			} {
+				if !strings.Contains(log, want) {
+					t.Fatalf("dolt calls missing %q:\n%s", want, log)
+				}
+			}
+		})
+	}
+}
+
 func TestOrphanSweepPreservesQualifiedRigAssignees(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -3079,6 +3167,88 @@ exit 0
 	}
 }
 
+func TestReaperSkipsDoltCommitOnMySQLBackend(t *testing.T) {
+	// Counterpart to TestReaperEscalatesDoltCommitFailure, but with a MySQL
+	// endpoint configured. mysqld has no DOLT_COMMIT stored procedure and
+	// autocommits each statement, so reaper must skip the commit entirely
+	// rather than issue it and record a spurious "Dolt commit failed" anomaly
+	// on every run. The stub still drives mutations (DELETE -> 1, closed-purge
+	// COUNT -> 1) so the commit block is reached and the skip is exercised.
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	doltLog := filepath.Join(t.TempDir(), "dolt-args.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+
+	writeCityMySQLConfig(t, cityDir, "mysql.example.internal", "4506", "mysql-user", "gascity_hq")
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+printf '%s\n' "$*" >> "$DOLT_ARGS_LOG"
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\nbeads\n'
+    ;;
+  *"CALL DOLT_COMMIT"*)
+    printf 'commit failed\n' >&2
+    exit 42
+    ;;
+  *"DELETE FROM "*"wisps"*)
+    printf 'ROW_COUNT()\n1\n'
+    ;;
+  *"status = 'closed'"*"closed_at <"*)
+    printf 'COUNT(*)\n1\n'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+  *"SELECT id"*)
+    printf 'id\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+
+	env := map[string]string{
+		"DOLT_ARGS_LOG": doltLog,
+		"GC_CALL_LOG":   gcLog,
+		"GC_CITY":       cityDir,
+		"GC_CITY_PATH":  cityDir,
+		// Blank the Dolt overrides so the MySQL config drives the backend.
+		"GC_DOLT_HOST":     "",
+		"GC_DOLT_PORT":     "",
+		"GC_DOLT_USER":     "",
+		"GC_DOLT_PASSWORD": "",
+		"PATH":             binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+
+	runScript(t, filepath.Join(exampleDir(), "packs", "maintenance", "assets", "scripts", "reaper.sh"), env)
+
+	logData, err := os.ReadFile(doltLog)
+	if err != nil {
+		t.Fatalf("ReadFile(dolt log): %v", err)
+	}
+	log := string(logData)
+	if !strings.Contains(log, "--port 4506") {
+		t.Fatalf("reaper did not route to the MySQL endpoint:\n%s", log)
+	}
+	if strings.Contains(log, "CALL DOLT_COMMIT") {
+		t.Fatalf("reaper issued CALL DOLT_COMMIT against the MySQL backend:\n%s", log)
+	}
+
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if strings.Contains(string(gcData), "Dolt commit failed") {
+		t.Fatalf("reaper escalated a Dolt commit failure on the MySQL backend:\n%s", gcData)
+	}
+}
+
 func TestReaperDoesNotCountFailedPurgeAsSuccess(t *testing.T) {
 	cityDir := t.TempDir()
 	binDir := t.TempDir()
@@ -4539,6 +4709,23 @@ func writeCityBeadsMetadata(t *testing.T, cityDir, db string) {
 	metadata := fmt.Sprintf("{\n  \"dolt_database\": %q\n}\n", db)
 	if err := os.WriteFile(filepath.Join(metadataDir, "metadata.json"), []byte(metadata), 0o644); err != nil {
 		t.Fatalf("WriteFile(metadata.json): %v", err)
+	}
+}
+
+func writeCityMySQLConfig(t *testing.T, cityDir, host, port, user, db string) {
+	t.Helper()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s): %v", beadsDir, err)
+	}
+	// Mirror the flat dotted-key shape bd writes to a MySQL-backed city's
+	// config.yaml (the 2026-05-26 Dolt->MySQL cutover).
+	config := fmt.Sprintf(
+		"issue_prefix: gc\ndolt.auto-start: false\nmysql.server-host: %s\nmysql.server-port: %s\nmysql.server-user: %s\nmysql.database: %s\n",
+		host, port, user, db,
+	)
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatalf("WriteFile(config.yaml): %v", err)
 	}
 }
 

@@ -520,8 +520,10 @@ while IFS= read -r DB; do
     # Commit Dolt changes. Must use CALL (not SELECT) and have an active
     # database via USE so CALL DOLT_COMMIT(...) runs in the target database.
     # Commit failures are surfaced as anomalies so the dog loop does not
-    # silently retry forever.
-    if [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
+    # silently retry forever. Skipped on the MySQL backend: mysqld has no
+    # DOLT_COMMIT procedure and autocommits each statement, so the mutations
+    # above are already durable (MAINT_BACKEND is set by dolt-target.sh).
+    if [ "${MAINT_BACKEND:-dolt}" != "mysql" ] && [ -z "$DRY_RUN" ] && [ "$DB_MUTATIONS" -gt 0 ]; then
         if ! COMMIT_OUTPUT=$(dolt_sql -q "
             USE \`$DB\`;
             CALL DOLT_COMMIT('-Am', 'reaper: stale_wisps=$STALE_WISP_COUNT closed_wisps=$DB_CLOSED_WISPS purged=$DB_PURGED stale_issues=$DB_ISSUES_CLOSED', '--author', 'reaper <reaper@gastown.local>')
