@@ -605,6 +605,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		// Record the tick reason for any bd subprocess spawned during
+		// this tick — TraceBDCall reads it to attribute calls to
+		// patrol vs poke. Single-tenant best-effort: restore the
+		// previous value on exit so nested ticks don't lose context.
+		prev := beads.SetReconcilerTickTrigger(trigger)
+		defer beads.RestoreReconcilerTickTrigger(prev)
 		cr.safeTick(func() {
 			cr.tick(ctx, dirty, &lastProviderName, cityRoot, &prevPoolRunning, trigger)
 		}, trigger)
