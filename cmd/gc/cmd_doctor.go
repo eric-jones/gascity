@@ -138,6 +138,15 @@ func (c *doltTopologyCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 		r.Message = "not using bd-backed Dolt topology"
 		return r
 	}
+	// MySQL-backed cities don't use Dolt topology — bd talks directly to
+	// the external MySQL server. The canonical/compat drift check would
+	// see the absence of a managed Dolt endpoint and report spurious
+	// errors.
+	if cityUsesMySQLBackend(c.cityPath) {
+		r.Status = doctor.StatusOK
+		r.Message = "mysql backend — Dolt topology not applicable"
+		return r
+	}
 	if err := validateCanonicalCompatDoltDrift(c.cityPath, c.cfg); err != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("canonical/compat Dolt drift: %v", err)
@@ -188,6 +197,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			register(newDoltTopologyCheck(cityPath, cfg))
 			register(newDoltDriftCheck(cityPath, cfg))
+		}
+		// Always register the mysql-backend check — it self-skips for non-
+		// mysql scopes and is cheap enough to run unconditionally.
+		register(newMysqlBackendCheck(cityPath))
+		for _, rig := range cfg.Rigs {
+			register(newMysqlBackendCheck(rig.Path))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))

@@ -337,6 +337,9 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 			return true, err
 		}
 		return true, nil
+	case "mysql":
+		clearProjectedPostgresEnv(env)
+		return true, nil
 	default:
 		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, scopeRoot)
 	}
@@ -361,6 +364,8 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 		}
 		return true, nil
 	case "", "dolt":
+		return false, nil
+	case "mysql":
 		return false, nil
 	default:
 		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, cityPath)
@@ -754,6 +759,17 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 	}
 	if target, ok, err := canonicalScopeDoltTarget(cityPath, cityPath); err != nil {
 		if !allowRecovery || !contract.IsManagedRuntimeUnavailable(err) {
+			// When the city uses a shared Dolt server and the canonical
+			// managed runtime resolution fails (for any reason — missing state
+			// file, stale PID, etc.), resolve the shared server port directly
+			// instead of returning an error. The managed runtime state is
+			// irrelevant for shared-server cities because gc does not own the
+			// Dolt lifecycle.
+			if cityUsesSharedDoltServer(cityPath) {
+				if port := resolveSharedDoltServerPort(); port != "" {
+					return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
+				}
+			}
 			return contract.DoltConnectionTarget{}, false, err
 		}
 		if port := recoveredManagedDoltPort(); port != "" {
@@ -776,6 +792,14 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 	if port := recoveredManagedDoltPort(); port != "" {
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
+	// When the city uses a shared Dolt server, resolve the shared server
+	// port as a fallback before attempting recovery (gc doesn't own the
+	// shared server, so recovery would be inappropriate).
+	if cityUsesSharedDoltServer(cityPath) {
+		if port := resolveSharedDoltServerPort(); port != "" {
+			return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
+		}
+	}
 	if allowRecovery {
 		if err := healthBeadsProvider(cityPath); err == nil {
 			resetRecoveryCache()
@@ -791,6 +815,85 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 		return contract.DoltConnectionTarget{}, false, managedRuntimeErr
 	}
 	return contract.DoltConnectionTarget{}, false, nil
+}
+
+// resolveSharedDoltServerPort returns the port of the shared Dolt server.
+// It checks (in order):
+//  1. BEADS_DOLT_SERVER_PORT env var (set by the shared server launcher)
+//  2. ~/.beads/shared-server/dolt-server.port file (written by bd shared-server)
+//  3. ~/.beads/shared-server/dolt-config.yaml listener.port (config file fallback)
+//
+// The third fallback exists because bd does not always write dolt-server.port
+// (only test fixtures do today; see beads explicit_db_nodb_test.go). When the
+// shared server is started manually with --config, the config file is the only
+// authoritative source for the port.
+//
+// Returns empty string if no source provides a port.
+func resolveSharedDoltServerPort() string {
+	if port := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_PORT")); port != "" {
+		return port
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	portFile := filepath.Join(home, ".beads", "shared-server", "dolt-server.port")
+	if data, err := os.ReadFile(portFile); err == nil {
+		if p := strings.TrimSpace(string(data)); p != "" {
+			return p
+		}
+	}
+	// Fallback: parse listener.port from dolt-config.yaml. This is a minimal
+	// regex-based parse — it does NOT pull in a full YAML dependency, since
+	// gc's bd_env.go is on a tight cold-start path. We only need the integer
+	// after "port:" inside a "listener:" block.
+	cfgFile := filepath.Join(home, ".beads", "shared-server", "dolt-config.yaml")
+	cfgData, err := os.ReadFile(cfgFile)
+	if err != nil {
+		return ""
+	}
+	return parseListenerPortFromYAML(string(cfgData))
+}
+
+// parseListenerPortFromYAML extracts the listener.port integer from a Dolt
+// sql-server config YAML. Returns empty string if the field is absent or
+// malformed. This is a defensive minimal parser — it does not validate the
+// full config; it only handles the listener block's port: line.
+func parseListenerPortFromYAML(yaml string) string {
+	inListener := false
+	for _, raw := range strings.Split(yaml, "\n") {
+		line := strings.TrimRight(raw, " \t\r")
+		trimmed := strings.TrimLeft(line, " \t")
+		// Detect listener: block start (no leading whitespace).
+		if !inListener {
+			if strings.HasPrefix(line, "listener:") {
+				inListener = true
+			}
+			continue
+		}
+		// Lines with no leading whitespace end the listener block.
+		if line != "" && line[0] != ' ' && line[0] != '\t' {
+			return ""
+		}
+		// Skip comments and blank lines.
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// Look for `port: <int>` (allow inline comments).
+		if strings.HasPrefix(trimmed, "port:") {
+			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "port:"))
+			// Strip trailing comment.
+			if i := strings.Index(rest, "#"); i >= 0 {
+				rest = strings.TrimSpace(rest[:i])
+			}
+			// Validate it's an integer.
+			if _, err := strconv.Atoi(rest); err == nil {
+				return rest
+			}
+			return ""
+		}
+	}
+	return ""
 }
 
 func managedLocalDoltEnv(env map[string]string) bool {
@@ -941,6 +1044,13 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 }
 
 func applyResolvedCityDoltEnv(env map[string]string, cityPath string, allowRecovery bool) error {
+	// Short-circuit for MySQL-backed cities: bd reads MySQL connection info
+	// from .beads/config.yaml directly.
+	if cityUsesMySQLBackend(cityPath) {
+		clearProjectedDoltEnv(env)
+		clearProjectedPostgresEnv(env)
+		return nil
+	}
 	target, ok, err := resolvedRuntimeCityDoltTarget(cityPath, allowRecovery)
 	if err != nil {
 		return err
@@ -994,6 +1104,23 @@ func rigAllowsResolvedCityTargetFallback(cityPath, rigPath string) bool {
 }
 
 func applyResolvedRigDoltEnv(env map[string]string, cityPath, rigPath string, explicitRig *config.Rig, allowRecovery bool) error {
+	// Short-circuit for MySQL-backed cities: bd reads MySQL connection info
+	// from .beads/config.yaml directly; no env projection needed.
+	if cityUsesMySQLBackend(cityPath) {
+		clearProjectedDoltEnv(env)
+		clearProjectedPostgresEnv(env)
+		return nil
+	}
+	// Short-circuit for shared-server cities: rigs inherit the shared port directly.
+	if cityUsesSharedDoltServer(cityPath) {
+		if port := resolveSharedDoltServerPort(); port != "" {
+			env["GC_DOLT_PORT"] = port
+			env["BEADS_DOLT_SERVER_PORT"] = port
+			env["GC_DOLT_HOST"] = "127.0.0.1"
+			mirrorBeadsDoltEnv(env)
+			return nil
+		}
+	}
 	if usedCanonical, err := applyCanonicalScopeBackendEnv(env, cityPath, rigPath); err != nil {
 		var invalid *contract.InvalidCanonicalConfigError
 		if errors.As(err, &invalid) {
@@ -1107,6 +1234,11 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
+	if cityUsesMySQLBackend(cityPath) {
+		clearProjectedDoltEnv(env)
+		clearProjectedPostgresEnv(env)
+		return env, nil
+	}
 	if usedPostgres, err := applyCityPostgresBackendEnv(env, cityPath); err != nil {
 		clearProjectedDoltEnv(env)
 		clearProjectedPostgresEnv(env)
@@ -1151,7 +1283,10 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	var projectionErr error
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
-		if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
+		if cityUsesMySQLBackend(cityPath) {
+			// MySQL backend needs no env projection; bd reads connection
+			// details from .beads/config.yaml directly.
+		} else if usedPostgres, err := applyCityPostgresBackendEnv(source, cityPath); err != nil {
 			clearProjectedDoltEnv(source)
 			clearProjectedPostgresEnv(source)
 			mirrorBeadsDoltEnv(source)

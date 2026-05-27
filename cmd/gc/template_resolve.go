@@ -286,6 +286,21 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		agentEnv["GC_BEADS_SCOPE_ROOT"] = rigRoot
 	}
 
+	// Step 8b: Inject workspace directory env vars for opted-in agents.
+	if dirs := agentWorkspaceDirectories(cfgAgent, p.city); len(dirs) > 0 {
+		for k, v := range config.WorkspaceDirectoryEnvVars(dirs) {
+			agentEnv[k] = v
+		}
+		agentEnv["GC_DIR_INJECTION_COUNT"] = fmt.Sprintf("%d", len(dirs))
+	} else {
+		// Debug: report why injection didn't fire
+		cityDirCount := 0
+		if p.city != nil {
+			cityDirCount = len(p.city.WorkspaceDirectories)
+		}
+		agentEnv["GC_DIR_INJECTION_DEBUG"] = fmt.Sprintf("city_dirs=%d,agent=%s,include=%v,names=%v", cityDirCount, cfgAgent.Name, cfgAgent.IncludeWorkspaceDirectories, cfgAgent.WorkspaceDirectoryNames)
+	}
+
 	// Step 9: Render prompt with beacon.
 	var prompt string
 	// Merge fragment sources: V1 global_fragments + inject_fragments,
@@ -299,6 +314,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		p.appendFragments,
 	)
 	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
+	// Resolve workspace directories for prompt context.
+	var promptDirs map[string]string
+	if dirs := agentWorkspaceDirectories(cfgAgent, p.city); len(dirs) > 0 {
+		promptDirs = config.WorkspaceDirectoryMap(dirs)
+	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:            p.cityPath,
 		AgentName:           qualifiedName,
@@ -315,6 +335,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		ProviderKey:         providerKey,
 		ProviderDisplayName: providerDisplayName,
 		Env:                 cfgAgent.Env,
+		Dirs:                promptDirs,
 	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)

@@ -69,6 +69,7 @@ type wizardConfig struct {
 	provider         string // built-in provider key, or "" if startCommand set
 	startCommand     string // custom start command (workspace-level)
 	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
+	mysql            initMysqlOptions
 }
 
 // defaultWizardConfig returns a non-interactive wizardConfig that produces
@@ -188,7 +189,60 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 		configName:   configName,
 		provider:     provider,
 		startCommand: startCommand,
+		mysql:        promptWizardBackend(br, stdout),
 	}
+}
+
+// promptWizardBackend asks the user whether the new city should use the
+// default managed-dolt backend or a MySQL backend. When mysql is selected,
+// also prompts for host/port/user/database (password is left for the env
+// var since we don't echo it). Returns an empty initMysqlOptions when dolt
+// is chosen — the regular gc init pipeline handles dolt natively.
+func promptWizardBackend(br *bufio.Reader, stdout io.Writer) initMysqlOptions {
+	fmt.Fprintln(stdout, "")                                               //nolint:errcheck
+	fmt.Fprintln(stdout, "Choose beads backend:")                          //nolint:errcheck
+	fmt.Fprintln(stdout, "  1. managed dolt — local, git-versioned (default)")  //nolint:errcheck
+	fmt.Fprintln(stdout, "  2. mysql        — external server, shared across rigs") //nolint:errcheck
+	fmt.Fprintf(stdout, "Backend [1]: ")                                   //nolint:errcheck
+
+	choice := readLine(br)
+	switch choice {
+	case "", "1", "dolt", "managed", "managed-dolt":
+		return initMysqlOptions{}
+	case "2", "mysql":
+		// fall through to prompts
+	default:
+		fmt.Fprintf(stdout, "Unknown backend %q, using managed dolt.\n", choice) //nolint:errcheck
+		return initMysqlOptions{}
+	}
+
+	opts := initMysqlOptions{Backend: "mysql"}
+	fmt.Fprintf(stdout, "MySQL host [127.0.0.1]: ") //nolint:errcheck
+	if v := readLine(br); v != "" {
+		opts.Host = v
+	} else {
+		opts.Host = "127.0.0.1"
+	}
+	fmt.Fprintf(stdout, "MySQL port [3306]: ") //nolint:errcheck
+	if v := readLine(br); v != "" {
+		opts.Port = v
+	} else {
+		opts.Port = "3306"
+	}
+	fmt.Fprintf(stdout, "MySQL user [root]: ") //nolint:errcheck
+	if v := readLine(br); v != "" {
+		opts.User = v
+	} else {
+		opts.User = "root"
+	}
+	fmt.Fprintf(stdout, "MySQL database (required): ") //nolint:errcheck
+	opts.Database = readLine(br)
+	if opts.Database == "" {
+		fmt.Fprintln(stdout, "  (no database name; falling back to managed dolt)") //nolint:errcheck
+		return initMysqlOptions{}
+	}
+	fmt.Fprintln(stdout, "  Password is read from $GC_MYSQL_PASSWORD; export it before continuing if your server requires one.") //nolint:errcheck
+	return opts
 }
 
 // resolveAgentChoice maps user input to a provider name. Input can be a
@@ -240,6 +294,12 @@ func newInitCmd(stdout, stderr io.Writer) *cobra.Command {
 	var skipProviderReadiness bool
 	var preserveExisting bool
 	var jsonOut bool
+	var backendFlag string
+	var mysqlHostFlag string
+	var mysqlPortFlag string
+	var mysqlUserFlag string
+	var mysqlPasswordFlag string
+	var mysqlDatabaseFlag string
 	cmd := &cobra.Command{
 		Use:   "init [path]",
 		Short: "Initialize a new city",
@@ -253,7 +313,12 @@ non-interactively, or --file to initialize from an existing TOML config file.
 
 Pass --preserve-existing to keep any pre-authored pack.toml, city.toml, or
 agent prompt files in the target directory (useful when bootstrapping a
-committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
+committed workspace — e.g. from a bootstrap.sh shipped in the repo).
+
+Pass --backend=mysql with --mysql-database=<name> to provision a MySQL-backed
+beads scope as part of init: gc creates the database, runs bd init, and writes
+canonical metadata. Default --mysql-host/port/user are 127.0.0.1/3306/root;
+the password is read from --mysql-password or $GC_MYSQL_PASSWORD.`,
 		Example: `  gc init
   gc init ~/my-city
   gc init --provider codex ~/my-city
@@ -261,7 +326,8 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
   gc init --name my-city
   gc init --from ~/elan --name elan /city
   gc init --file examples/gastown.toml ~/bright-lights
-  gc init --file city.toml --preserve-existing .`,
+  gc init --file city.toml --preserve-existing .
+  gc init --provider claude --backend mysql --mysql-database mycity_beads ~/my-city`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			out := stdout
@@ -269,6 +335,18 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 				out = io.Discard
 			}
 			mode := "default"
+			mysql := initMysqlOptions{
+				Backend:  backendFlag,
+				Host:     mysqlHostFlag,
+				Port:     mysqlPortFlag,
+				User:     mysqlUserFlag,
+				Password: mysqlPasswordFlag,
+				Database: mysqlDatabaseFlag,
+			}
+			if err := validateInitMysqlOptions(mysql); err != nil {
+				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck
+				return errExit
+			}
 			if fromFlag != "" {
 				mode = "from"
 				code := cmdInitFromDirWithOptions(fromFlag, args, nameFlag, out, stderr, skipProviderReadiness)
@@ -282,7 +360,7 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 			if providerFlag != "" || bootstrapProfileFlag != "" {
 				mode = "provider"
 			}
-			code := cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut)
+			code := cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut, mysql)
 			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
 		},
 	}
@@ -294,6 +372,12 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&skipProviderReadiness, "skip-provider-readiness", false, "skip provider login/readiness checks during init and continue startup")
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
+	cmd.Flags().StringVar(&backendFlag, "backend", "", "beads backend for the new city (only \"mysql\" is supported here; default leaves init's regular dolt-managed backend in place)")
+	cmd.Flags().StringVar(&mysqlHostFlag, "mysql-host", "127.0.0.1", "MySQL server host (used with --backend=mysql)")
+	cmd.Flags().StringVar(&mysqlPortFlag, "mysql-port", "3306", "MySQL server port (used with --backend=mysql)")
+	cmd.Flags().StringVar(&mysqlUserFlag, "mysql-user", "root", "MySQL server user (used with --backend=mysql)")
+	cmd.Flags().StringVar(&mysqlPasswordFlag, "mysql-password", "", "MySQL server password (used with --backend=mysql; falls back to $GC_MYSQL_PASSWORD)")
+	cmd.Flags().StringVar(&mysqlDatabaseFlag, "mysql-database", "", "MySQL database name (required with --backend=mysql)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
 	cmd.MarkFlagsMutuallyExclusive("provider", "file")
 	cmd.MarkFlagsMutuallyExclusive("provider", "from")
@@ -341,19 +425,50 @@ func initTargetPath(args []string) (string, error) {
 	return os.Getwd()
 }
 
+// initMysqlOptions captures --backend / --mysql-* flags. When Backend is empty
+// the init flow is unchanged; when Backend == "mysql" gc init runs
+// doBeadsCityUseMysql against the freshly-scaffolded city after doInit
+// completes.
+type initMysqlOptions struct {
+	Backend  string
+	Host     string
+	Port     string
+	User     string
+	Password string
+	Database string
+}
+
+// validateInitMysqlOptions checks the --backend / --mysql-* flag combo. Empty
+// Backend means dolt (default); Backend == "mysql" requires Database.
+func validateInitMysqlOptions(opts initMysqlOptions) error {
+	backend := strings.TrimSpace(opts.Backend)
+	if backend == "" {
+		// Backend not requested. mysql.* flags are advisory at this point —
+		// leave them alone.
+		return nil
+	}
+	if backend != "mysql" {
+		return fmt.Errorf("--backend=%q not supported (only \"mysql\" can be requested at init time)", opts.Backend)
+	}
+	if strings.TrimSpace(opts.Database) == "" {
+		return fmt.Errorf("--backend=mysql requires --mysql-database")
+	}
+	return nil
+}
+
 // cmdInit initializes a new city at the given path (or cwd if no path given).
 // Runs the interactive wizard to choose a config template and provider.
 // Creates the runtime scaffold and city.toml. If the bead provider is "bd", also
 // runs bd init.
 func cmdInit(args []string, providerFlag, bootstrapProfileFlag string, stdout, stderr io.Writer) int {
-	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, false, false)
+	return cmdInitWithOptions(args, providerFlag, bootstrapProfileFlag, "", stdout, stderr, false, false, initMysqlOptions{})
 }
 
-func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool) int {
-	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false)
+func cmdInitWithOptions(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, mysql initMysqlOptions) int {
+	return cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameOverride, stdout, stderr, skipProviderReadiness, preserveExisting, false, mysql)
 }
 
-func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool) int {
+func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFlag, nameOverride string, stdout, stderr io.Writer, skipProviderReadiness, preserveExisting bool, forceDefaultWizard bool, mysql initMysqlOptions) int {
 	var cityPath string
 	if len(args) > 0 {
 		var err error
@@ -387,17 +502,45 @@ func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFla
 	case isTerminalFunc(os.Stdin):
 		wiz = runWizard(os.Stdin, stdout)
 		maybePrintWizardProviderGuidance(wiz, stdout)
+		// Honor the wizard's backend choice when the user didn't pass --backend
+		// on the command line. Explicit flags always win over wizard answers.
+		if strings.TrimSpace(mysql.Backend) == "" && strings.TrimSpace(wiz.mysql.Backend) != "" {
+			mysql = wiz.mysql
+		}
 	default:
 		wiz = defaultWizardConfig()
 	}
 	if code := doInit(fsys.OSFS{}, cityPath, wiz, nameOverride, stdout, stderr, preserveExisting); code != 0 {
 		return code
 	}
-	return finalizeInit(cityPath, stdout, stderr, initFinalizeOptions{
+	if code := finalizeInit(cityPath, stdout, stderr, initFinalizeOptions{
 		skipProviderReadiness: skipProviderReadiness,
 		showProgress:          true,
 		commandName:           "gc init",
-	})
+	}); code != 0 {
+		return code
+	}
+	if strings.TrimSpace(mysql.Backend) == "mysql" {
+		if code := runInitMysqlSwitch(cityPath, mysql, stdout, stderr); code != 0 {
+			return code
+		}
+	}
+	return 0
+}
+
+// runInitMysqlSwitch flips a freshly-scaffolded city to a MySQL beads backend
+// by delegating to doBeadsCityUseMysql. Called only when --backend=mysql was
+// requested. Errors propagate to the caller's exit code.
+func runInitMysqlSwitch(cityPath string, mysql initMysqlOptions, stdout, stderr io.Writer) int {
+	fmt.Fprintln(stdout, "gc init: switching new city to mysql backend") //nolint:errcheck
+	opts := cityMysqlOptions{
+		Host:     mysql.Host,
+		Port:     mysql.Port,
+		User:     mysql.User,
+		Password: mysql.Password,
+		Database: mysql.Database,
+	}
+	return doBeadsCityUseMysql(fsys.OSFS{}, cityPath, opts, stdout, stderr)
 }
 
 func resumeExistingInitIfPossible(fs fsys.FS, cityPath string, stdout, stderr io.Writer, commandName string, showProgress bool, skipProviderReadiness bool) (bool, int) {

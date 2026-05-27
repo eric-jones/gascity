@@ -67,6 +67,16 @@ func readPublishedDoltRuntimeStateHint(cityPath string) (doltRuntimeState, bool,
 }
 
 func managedDoltLifecycleOwned(cityPath string) (bool, error) {
+	// When the city uses a shared Dolt server, gc does not own the Dolt
+	// lifecycle — the shared server is managed externally.
+	if cityUsesSharedDoltServer(cityPath) {
+		return false, nil
+	}
+	// When the city's bd metadata declares backend: mysql, bd talks directly
+	// to an external MySQL server. There is no managed-dolt runtime to own.
+	if cityUsesMySQLBackend(cityPath) {
+		return false, nil
+	}
 	if cityUsesBdStoreContract(cityPath) {
 		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
 		if err != nil {

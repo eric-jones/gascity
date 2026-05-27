@@ -186,6 +186,10 @@ type City struct {
 	NamedSessions []NamedSession `toml:"named_session,omitempty"`
 	// Rigs lists external projects registered in the city.
 	Rigs []Rig `toml:"rigs,omitempty"`
+	// WorkspaceDirectories declares named directories available to agents.
+	// Lighter than rigs: no beads DB, no pack imports, no agent scoping.
+	// TOML key: additional_directories (under [workspace] context).
+	WorkspaceDirectories []WorkspaceDirectory `toml:"additional_directories,omitempty"`
 	// Patches holds targeted modifications applied after fragment merge.
 	Patches Patches `toml:"patches,omitempty"`
 	// Beads configures the bead store backend.
@@ -962,6 +966,32 @@ type ResolvedPackGlobal struct {
 	PackName    string
 }
 
+// WorkspaceDirectory declares a named directory available to agents.
+// Lighter than a rig: no beads DB, no pack imports, no agent scoping.
+// Directories provide named path references that agents can opt into
+// for environment variable injection and prompt template context.
+type WorkspaceDirectory struct {
+	// Name is the unique identifier for this directory.
+	Name string `toml:"name" jsonschema:"required"`
+	// Path is the filesystem path. May use {rig:<name>} interpolation
+	// for paths nested inside a registered rig.
+	Path string `toml:"path" jsonschema:"required"`
+	// GitEnabled allows agents to make git commits in this directory.
+	// When false (default), agents should treat the directory as read-only.
+	GitEnabled bool `toml:"git_enabled,omitempty"`
+	// DefaultBranch is the directory's mainline branch when GitEnabled=true.
+	// Used by agents to ensure they're on the correct branch before committing.
+	DefaultBranch string `toml:"default_branch,omitempty"`
+	// ResolvedPath holds the absolute path after {rig:name} interpolation.
+	// Runtime-only — not persisted to TOML.
+	ResolvedPath string `toml:"-" json:"-"`
+	// ParentRig is the name of the rig this directory is nested inside,
+	// derived from {rig:name} interpolation. When set, beads for work in
+	// this directory are scoped to the parent rig's beads DB.
+	// Runtime-only — not persisted to TOML.
+	ParentRig string `toml:"-" json:"-"`
+}
+
 // EffectivePrefix returns the bead ID prefix for this rig. Uses the
 // explicit Prefix if set, otherwise derives one from the Name.
 func (r *Rig) EffectivePrefix() string {
@@ -1160,6 +1190,14 @@ type SessionConfig struct {
 	// NudgeLockTimeout is how long to wait to acquire the per-session nudge lock.
 	// Duration string. Defaults to "30s".
 	NudgeLockTimeout string `toml:"nudge_lock_timeout,omitempty" jsonschema:"default=30s"`
+	// NudgeIdleSecs is how long the user (any attached tmux client) must
+	// have been keyboard-idle before a nudge is delivered. Avoids
+	// interrupting an operator who is mid-typing. Detected via tmux's
+	// `#{client_activity}` (epoch seconds of last keypress). 0 disables
+	// the check (deliver immediately). Total deferral is capped at 5
+	// minutes so a permanently-active operator can't block forever.
+	// Defaults to 20.
+	NudgeIdleSecs *int `toml:"nudge_idle_secs,omitempty" jsonschema:"default=20"`
 	// DebounceMs is the default debounce interval in milliseconds for send-keys.
 	// Defaults to 500.
 	DebounceMs *int `toml:"debounce_ms,omitempty" jsonschema:"default=500"`
@@ -1263,6 +1301,16 @@ func (s *SessionConfig) DisplayMsOrDefault() int {
 		return 5000
 	}
 	return *s.DisplayMs
+}
+
+// NudgeIdleSecsOrDefault returns how long the user must be idle before
+// nudges deliver. Defaults to 20s if nil. 0 means disabled (immediate
+// delivery).
+func (s *SessionConfig) NudgeIdleSecsOrDefault() int {
+	if s.NudgeIdleSecs == nil {
+		return 20
+	}
+	return *s.NudgeIdleSecs
 }
 
 // ACPSessionConfig holds settings for the ACP session provider.
@@ -1442,6 +1490,24 @@ type DoltConfig struct {
 	// 1 enables archive compaction (higher CPU on startup).
 	// nil (omitted) defaults to 0.
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
+	// AutoGc controls whether Dolt's auto_gc behavior is enabled in the
+	// managed dolt-config.yaml. Accepted values:
+	//   "true" / "on" / "enabled"   → auto_gc_behavior.enable=true,
+	//                                  dolt_auto_gc_enabled="ON"
+	//   "false" / "off" / "disabled" → auto_gc_behavior.enable=false,
+	//                                   dolt_auto_gc_enabled="OFF"
+	// Empty (default) → "true". Override globally with env GC_DOLT_AUTO_GC.
+	// Note: dolt#10944's load-avg gate means upstream auto_gc may not fire
+	// in practice on busy machines; pair with `gc dolt compact` for
+	// guaranteed cleanup.
+	AutoGc string `toml:"auto_gc,omitempty" jsonschema:"default=true"`
+	// Autocommit controls Dolt's session-level autocommit behavior in the
+	// managed dolt-config.yaml. Accepted values:
+	//   "batch" / "off"   → behavior.autocommit=false (group writes, fewer
+	//                       commits — recommended for managed gas-city use)
+	//   "on" / "true"     → behavior.autocommit=true  (commit per statement)
+	// Empty (default) → "batch". Override globally with env GC_DOLT_AUTOCOMMIT.
+	Autocommit string `toml:"autocommit,omitempty" jsonschema:"default=batch"`
 }
 
 // FormulasConfig holds legacy formula directory settings.
@@ -2410,6 +2476,15 @@ type Agent struct {
 	//   *false -> disable; the template is responsible for rendering
 	//             any skill guidance itself
 	InjectAssignedSkills *bool `toml:"inject_assigned_skills,omitempty"`
+	// IncludeWorkspaceDirectories controls whether all workspace directories
+	// are injected into this agent's environment and prompt context.
+	// When true, all directories declared in [[workspace_directories]] are
+	// available as GC_DIR_<NAME> env vars and {{.Dirs.<name>}} template vars.
+	IncludeWorkspaceDirectories *bool `toml:"include_workspace_directories,omitempty"`
+	// WorkspaceDirectoryNames selectively includes specific workspace directories
+	// by name. When non-empty, only the listed directories are injected.
+	// Takes precedence over IncludeWorkspaceDirectories when both are set.
+	WorkspaceDirectoryNames []string `toml:"workspace_directory_names,omitempty"`
 	// Attach controls whether the agent's session supports interactive
 	// attachment (e.g., tmux attach). When false, the agent can use a
 	// lighter runtime (subprocess instead of tmux). Defaults to true.
@@ -3540,6 +3615,29 @@ func ValidateRigs(rigs []Rig, hqPrefix string) error {
 			return fmt.Errorf("rig %q: prefix %q collides with %s", r.Name, prefix, other)
 		}
 		seenPrefixes[prefix] = r.Name
+	}
+	return nil
+}
+
+// ValidateWorkspaceDirectories checks workspace directory declarations for
+// uniqueness and required fields. Path interpolation ({rig:name}) is validated
+// separately during config loading when the rig list is available.
+func ValidateWorkspaceDirectories(dirs []WorkspaceDirectory) error {
+	seenNames := make(map[string]bool, len(dirs))
+	for i, d := range dirs {
+		if d.Name == "" {
+			return fmt.Errorf("workspace_directories[%d]: name is required", i)
+		}
+		if d.Path == "" {
+			return fmt.Errorf("workspace_directories[%d] %q: path is required", i, d.Name)
+		}
+		if seenNames[d.Name] {
+			return fmt.Errorf("workspace_directories[%d] %q: duplicate name", i, d.Name)
+		}
+		seenNames[d.Name] = true
+		if d.DefaultBranch != "" && !d.GitEnabled {
+			return fmt.Errorf("workspace_directories[%d] %q: default_branch set but git_enabled is false", i, d.Name)
+		}
 	}
 	return nil
 }
