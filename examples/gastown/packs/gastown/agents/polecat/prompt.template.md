@@ -270,8 +270,19 @@ if [ "$AUTO_PUSH" = "false" ]; then
   exit 0
 fi
 git push origin HEAD
+CURRENT_BRANCH=$(git branch --show-current)
+case "$CURRENT_BRANCH" in
+  gc-*)
+    echo "ERROR: current branch '$CURRENT_BRANCH' is the per-slot worktree branch from worktree-setup," >&2
+    echo "       not a feature branch. Stamping it on the work bead would point the refinery at the" >&2
+    echo "       slot's persistent branch — which the next polecat in this slot will reuse — causing" >&2
+    echo "       cross-bead branch collisions. The formula's workspace-setup step creates the feature" >&2
+    echo "       branch ('polecat/{{ "{{issue}}" }}'); pour mol-polecat-work and walk it before resubmitting." >&2
+    exit 1
+    ;;
+esac
 gc bd update <work-bead> \
-  --set-metadata branch=$(git branch --show-current) \
+  --set-metadata branch="$CURRENT_BRANCH" \
   --set-metadata target={{ .DefaultBranch }} \
   --notes "Implemented: <brief summary>"
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}refinery"
@@ -286,6 +297,16 @@ Your work is not complete until you run these commands. `gc runtime drain-ack`
 signals the reconciler to kill this session — it will only restart you if the
 pool check command finds more work. Sitting idle after finishing implementation
 is the "Idle Polecat heresy."
+
+The `gc-*` branch guard above catches the case where the agent skipped the
+formula's workspace-setup step and is still on the per-slot persistent branch
+that `worktree-setup.sh` creates (named `gc-<agent>-<hash>`, where `<agent>`
+is the polecat slot name). Stamping that branch on the work bead is the
+failure mode where the refinery sees two work beads pointing at the same
+branch — pool slot reuse means the next polecat in the slot inherits the same
+worktree-setup branch, and without a feature branch in between, every bead
+through that slot stamps the same name. The guard fails loud rather than
+silently corrupt downstream merge state.
 
 ---
 

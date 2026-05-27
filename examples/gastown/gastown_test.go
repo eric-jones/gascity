@@ -500,6 +500,57 @@ func TestPolecatFormulaTreatsMetadataBranchAsAuthoritative(t *testing.T) {
 	)
 }
 
+// TestPolecatPromptRejectsWorktreeSetupBranchOnSubmit guards against the
+// failure mode where the polecat's done sequence stamps the per-slot
+// persistent worktree branch (`gc-<agent>-<hash>`, created by
+// `worktree-setup.sh`) onto the work bead's `branch` metadata.
+//
+// The pool reuses slot identities — a new polecat in slot `furiosa` gets
+// the same worktree path and therefore the same `worktree-setup.sh`
+// branch as the previous occupant. If the agent skips the formula's
+// workspace-setup step (which would create a fresh `polecat/<issue>`
+// feature branch), `git branch --show-current` returns the persistent
+// `gc-furiosa-<hash>` branch. Stamping that on the work bead points the
+// refinery at the slot's branch — and every subsequent bead through that
+// slot stamps the same name, producing cross-bead branch collisions
+// where multiple work beads share one branch.
+//
+// The guard fails loud with `exit 1` rather than silently corrupting
+// downstream merge state. Codified after stg-b9di / events.jsonl
+// inspection of validate-l5-20260510-v3 confirmed two work beads
+// (vl2vr-73h, vl2vr-gcw) ended up sharing branch `gc-furiosa-14808603229f`
+// across two polecat sessions in the same `furiosa` slot, which matches
+// the `branch_name()` output of `worktree-setup.sh` for that worktree
+// path exactly.
+func TestPolecatPromptRejectsWorktreeSetupBranchOnSubmit(t *testing.T) {
+	dir := exampleDir()
+	path := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	prompt := string(data)
+
+	// The done-sequence guard must capture the current branch, refuse
+	// `gc-*` (the worktree-setup pattern), and stamp `branch=` from the
+	// captured variable rather than re-running `git branch --show-current`
+	// inside the metadata write.
+	assertContainsInOrder(t, prompt,
+		`CURRENT_BRANCH=$(git branch --show-current)`,
+		`case "$CURRENT_BRANCH" in`,
+		`gc-*)`,
+		`exit 1`,
+		`--set-metadata branch="$CURRENT_BRANCH"`,
+	)
+
+	// Guard against the prior shape that stamped `git branch
+	// --show-current` directly inside the `gc bd update` line — that's
+	// the bug this test exists to prevent recurring.
+	if strings.Contains(prompt, `--set-metadata branch=$(git branch --show-current)`) {
+		t.Fatalf("polecat prompt still pipes `git branch --show-current` straight into `--set-metadata branch=`; capture and validate against the `gc-*` worktree-setup pattern first")
+	}
+}
+
 func TestPolecatFormulaRecordsExistingPRMetadataOnSubmit(t *testing.T) {
 	dir := exampleDir()
 	path := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
