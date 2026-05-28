@@ -24,6 +24,50 @@ func assignedWorkIndexReachableFromAgent(cityPath string, cfg *config.City, agen
 	return storeRefs[index] == assignedWorkStoreRefForAgent(cityPath, cfg, agentCfg)
 }
 
+// agentReachesWorkflowStore reports whether the supervisor's scale_check
+// for agentCfg can read beads from the store identified by storeRef.
+// storeRef uses the workflowStoreRefForDir format ("city:<name>" for HQ,
+// "rig:<name>" for rig stores; empty when the store cannot be classified).
+//
+// A rig-scoped agent's scale_check runs in the rig's directory and queries
+// only that rig's bead store. An HQ-scoped agent's scale_check queries the
+// city store. A bead routed to an agent it cannot reach is invisible to
+// scale_check and silently wedges the pool (see tr-6s7yx).
+//
+// Returns true permissively when cfg or agentCfg is nil — callers should
+// only use this to refuse routes when both pieces of information are known.
+func agentReachesWorkflowStore(storeRef string, agentCfg *config.Agent, cityPath string, cfg *config.City) bool {
+	if cfg == nil || agentCfg == nil {
+		return true
+	}
+	agentRig := configuredRigName(cityPath, agentCfg, cfg.Rigs)
+	if agentRig == "" {
+		return strings.HasPrefix(storeRef, "city:")
+	}
+	return storeRef == "rig:"+agentRig
+}
+
+// agentReachableStoreLabel returns the workflowStoreRefForDir-formatted
+// label for the store an agent's scale_check can read. Used in error
+// messages from the cross-store sling guard so the label uses the same
+// shape as deps.StoreRef.
+//
+// Returns the empty string when cfg or agentCfg is nil.
+func agentReachableStoreLabel(agentCfg *config.Agent, cityPath, cityName string, cfg *config.City) string {
+	if cfg == nil || agentCfg == nil {
+		return ""
+	}
+	agentRig := configuredRigName(cityPath, agentCfg, cfg.Rigs)
+	if agentRig == "" {
+		cn := strings.TrimSpace(cityName)
+		if cn == "" {
+			cn = "city"
+		}
+		return "city:" + cn
+	}
+	return "rig:" + agentRig
+}
+
 // filterAssignedWorkBeadsForPoolDemand resolves work through the routed
 // backing template because pool scale decisions are per agent template.
 func filterAssignedWorkBeadsForPoolDemand(
