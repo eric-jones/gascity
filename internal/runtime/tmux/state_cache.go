@@ -46,8 +46,10 @@ type sessionRuntimeState struct {
 }
 
 type processRuntimeState struct {
-	PID     string
-	PPID    string
+	PID  string
+	PPID string
+	// Command is the process identity used for name matching. Linux sources it
+	// from ps comm; Darwin joins a separate comm snapshot onto the args snapshot.
 	Command string
 	Args    string
 }
@@ -388,6 +390,9 @@ func newProcessSnapshot(processes []processRuntimeState) processSnapshot {
 }
 
 func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
+	if goruntime.GOOS == "darwin" {
+		return fetchDarwinProcessSnapshot(ctx)
+	}
 	out, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
 	if err != nil {
 		return processSnapshot{}, fmt.Errorf("fetching process snapshot: %w", err)
@@ -395,16 +400,33 @@ func fetchProcessSnapshot(ctx context.Context) (processSnapshot, error) {
 	return parseProcessSnapshot(string(out)), nil
 }
 
+func fetchDarwinProcessSnapshot(ctx context.Context) (processSnapshot, error) {
+	argsOut, err := exec.CommandContext(ctx, "ps", processSnapshotPSArgs()...).Output()
+	if err != nil {
+		return processSnapshot{}, fmt.Errorf("fetching Darwin process args snapshot: %w", err)
+	}
+	commOut, err := exec.CommandContext(ctx, "ps", darwinCommandSnapshotPSArgs()...).Output()
+	if err != nil {
+		return processSnapshot{}, fmt.Errorf("fetching Darwin process command snapshot: %w", err)
+	}
+	return parseDarwinProcessSnapshot(string(argsOut), string(commOut)), nil
+}
+
 // processSnapshotPSArgs returns the platform-appropriate `ps` arguments for
 // the process snapshot. macOS's ps does not accept the BSD column-width
-// suffix (e.g. `pid:10=`) that Linux ps supports; on Darwin we omit the
-// widths and parse with whitespace splitting. On Linux we keep the
-// wide-column form so the fast fixed-column parser is exercised.
+// suffix (e.g. `pid:10=`) that Linux ps supports; on Darwin we omit the widths
+// and fetch comm separately so both args and command identity are safe to parse
+// as trailing columns. On Linux we keep the wide-column form so the fast
+// fixed-column parser is exercised.
 func processSnapshotPSArgs() []string {
 	if goruntime.GOOS == "darwin" {
-		return []string{"-eo", "pid=,ppid=,comm=,args="}
+		return []string{"-eo", "pid=,ppid=,args="}
 	}
 	return []string{"-eo", "pid:10=,ppid:10=,comm:64=,args="}
+}
+
+func darwinCommandSnapshotPSArgs() []string {
+	return []string{"-eo", "pid=,ppid=,comm="}
 }
 
 func parseProcessSnapshot(out string) processSnapshot {
@@ -415,6 +437,46 @@ func parseProcessSnapshot(out string) processSnapshot {
 			continue
 		}
 		processes = append(processes, process)
+	}
+	return newProcessSnapshot(processes)
+}
+
+func parseDarwinProcessSnapshot(argsOut, commOut string) processSnapshot {
+	processesByPID := make(map[string]processRuntimeState)
+	pidOrder := make([]string, 0)
+	upsert := func(process processRuntimeState) {
+		if _, ok := processesByPID[process.PID]; !ok {
+			pidOrder = append(pidOrder, process.PID)
+		}
+		processesByPID[process.PID] = process
+	}
+
+	for _, line := range strings.Split(commOut, "\n") {
+		process, ok := parseDarwinCommandSnapshotLine(line)
+		if !ok {
+			continue
+		}
+		upsert(process)
+	}
+	for _, line := range strings.Split(argsOut, "\n") {
+		process, ok := parseProcessSnapshotLineDarwin(line)
+		if !ok {
+			continue
+		}
+		if existing, ok := processesByPID[process.PID]; ok && existing.PPID == process.PPID {
+			existing.Args = process.Args
+			if existing.Command == "" {
+				existing.Command = process.Command
+			}
+			upsert(existing)
+			continue
+		}
+		upsert(process)
+	}
+
+	processes := make([]processRuntimeState, 0, len(pidOrder))
+	for _, pid := range pidOrder {
+		processes = append(processes, processesByPID[pid])
 	}
 	return newProcessSnapshot(processes)
 }
@@ -452,96 +514,79 @@ func parseProcessSnapshotLineFixedColumns(line string) (processRuntimeState, boo
 	return process, true
 }
 
-// darwinCommColWidth is BSD `ps -o comm=` column width on macOS: the kernel
-// MAXCOMLEN constant (16). ps left-aligns the comm value within this fixed
-// column and pads with spaces, so the column always occupies exactly 16
-// characters of output regardless of the actual command length.
-const darwinCommColWidth = 16
-
 // parseProcessSnapshotLineDarwin parses one line of
-// `ps -eo pid=,ppid=,comm=,args=` output on macOS.
+// `ps -eo pid=,ppid=,args=` output on macOS.
 //
 // Line layout (SEP = single space):
 //
-//	<pid right-aligned> SEP <ppid right-aligned> SEP <comm padded to 16> SEP <args>
+//	<pid right-aligned> SEP <ppid right-aligned> SEP <args>
 //
-// PID/PPID column widths are dynamic (sized to the largest value in the
-// set, minimum 5 chars on stock kernels), so they are parsed by
-// whitespace tokenization. COMM is a fixed-width column because the BSD
-// kernel's process name is bounded by MAXCOMLEN=16 — and crucially CAN
-// contain internal whitespace (e.g., audio-driver workers register as
-// "Core Audio Drive"). Slicing comm at a fixed width preserves such
-// names; a whitespace tokenizer would split them across fields and shift
-// the args column.
+// PID/PPID column widths are dynamic, so only those two numeric fields are
+// parsed as whitespace-delimited tokens. The args column is last and is kept
+// verbatim aside from outer whitespace. Command is derived from argv[0] as a
+// fallback; the Darwin fetch path joins a separate comm snapshot when available.
 func parseProcessSnapshotLineDarwin(line string) (processRuntimeState, bool) {
-	// Skip leading whitespace (right-aligned PID has padding before its value).
-	i := 0
-	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
-		i++
-	}
-	if i >= len(line) {
+	pid, remaining, ok := takeWhitespaceDelimitedToken(line)
+	if !ok {
 		return processRuntimeState{}, false
 	}
-
-	// PID — first non-whitespace token.
-	pidStart := i
-	for i < len(line) && line[i] != ' ' && line[i] != '\t' {
-		i++
-	}
-	pid := line[pidStart:i]
-
-	// Skip inter-column whitespace.
-	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
-		i++
-	}
-	if i >= len(line) {
+	ppid, remaining, ok := takeWhitespaceDelimitedToken(remaining)
+	if !ok {
 		return processRuntimeState{}, false
 	}
-
-	// PPID — second non-whitespace token. PPID is right-aligned and fills
-	// its column, so the next char after the PPID value is the single
-	// column-separator space before COMM.
-	ppidStart := i
-	for i < len(line) && line[i] != ' ' && line[i] != '\t' {
-		i++
-	}
-	ppid := line[ppidStart:i]
-
-	if i >= len(line) {
+	args := strings.TrimSpace(remaining)
+	argv := strings.Fields(args)
+	if len(argv) == 0 {
 		return processRuntimeState{}, false
 	}
-	i++ // skip the separator between PPID and COMM
-
-	// COMM is a fixed 16-char column. Slice it directly so values with
-	// internal whitespace remain intact.
-	commEnd := i + darwinCommColWidth
-	var comm, args string
-	if commEnd > len(line) {
-		// Truncated line (no trailing args column on this row). Take
-		// whatever remains as comm; args is empty.
-		comm = strings.TrimRight(line[i:], " \t")
-	} else {
-		comm = strings.TrimRight(line[i:commEnd], " \t")
-		i = commEnd
-		// Skip the column separator between COMM and ARGS, then take the
-		// remainder verbatim so internal whitespace in args is preserved.
-		if i < len(line) && (line[i] == ' ' || line[i] == '\t') {
-			i++
-		}
-		if i < len(line) {
-			args = line[i:]
-		}
-	}
-
-	if pid == "" || ppid == "" || comm == "" {
+	command := filepath.Base(argv[0])
+	if pid == "" || ppid == "" || command == "" {
 		return processRuntimeState{}, false
 	}
 	return processRuntimeState{
 		PID:     pid,
 		PPID:    ppid,
-		Command: comm,
+		Command: command,
 		Args:    args,
 	}, true
+}
+
+// parseDarwinCommandSnapshotLine parses one line of
+// `ps -eo pid=,ppid=,comm=` output on macOS. The comm column is requested in a
+// separate snapshot so it is the final field and can contain whitespace safely.
+func parseDarwinCommandSnapshotLine(line string) (processRuntimeState, bool) {
+	pid, remaining, ok := takeWhitespaceDelimitedToken(line)
+	if !ok {
+		return processRuntimeState{}, false
+	}
+	ppid, remaining, ok := takeWhitespaceDelimitedToken(remaining)
+	if !ok {
+		return processRuntimeState{}, false
+	}
+	command := strings.TrimSpace(remaining)
+	if pid == "" || ppid == "" || command == "" {
+		return processRuntimeState{}, false
+	}
+	return processRuntimeState{
+		PID:     pid,
+		PPID:    ppid,
+		Command: command,
+	}, true
+}
+
+func takeWhitespaceDelimitedToken(input string) (token string, remaining string, ok bool) {
+	i := 0
+	for i < len(input) && (input[i] == ' ' || input[i] == '\t') {
+		i++
+	}
+	if i >= len(input) {
+		return "", "", false
+	}
+	start := i
+	for i < len(input) && input[i] != ' ' && input[i] != '\t' {
+		i++
+	}
+	return input[start:i], input[i:], true
 }
 
 func (s processSnapshot) processMatchesNames(pid string, names map[string]struct{}) bool {

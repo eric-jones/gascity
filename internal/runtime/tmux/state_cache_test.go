@@ -480,10 +480,10 @@ func TestParseProcessSnapshotLineFixedColumns(t *testing.T) {
 }
 
 func TestParseProcessSnapshotLineDarwin(t *testing.T) {
-	// Real macOS `ps -eo pid=,ppid=,comm=,args=` line layout:
-	// PID/PPID right-aligned in dynamic-width columns, COMM left-aligned
-	// in exactly 16 chars (MAXCOMLEN), single-space separators between
-	// columns, ARGS verbatim at the end.
+	// macOS omits fixed-width modifiers because its ps rejects Linux's
+	// `:N=` syntax. The Darwin snapshot asks for pid, ppid, and args only;
+	// the command name is derived from argv[0] instead of guessing where an
+	// unbounded comm column ends.
 	cases := []struct {
 		name     string
 		line     string
@@ -493,54 +493,44 @@ func TestParseProcessSnapshotLineDarwin(t *testing.T) {
 		wantArgs string
 	}{
 		{
-			name:     "comm shorter than column, padded",
-			line:     "  123     1 /sbin/launchd    /sbin/launchd --boot",
+			name:     "short argv0 with dynamic numeric columns",
+			line:     "  123     1 /sbin/launchd --boot",
 			wantPID:  "123",
 			wantPPID: "1",
-			wantCmd:  "/sbin/launchd",
+			wantCmd:  "launchd",
 			wantArgs: "/sbin/launchd --boot",
 		},
 		{
-			// Regression guard for the original bug surface
-			// (gascity#2442). BSD `ps -o comm=` emits the executable
-			// path truncated to MAXCOMLEN=16 — and audio-driver workers
-			// (and other long-name kernel actors) register with comm
-			// values whose first 16 chars CONTAIN spaces, e.g.
-			// "Core Audio Drive". A whitespace tokenizer would split
-			// such a value across Command and Args, breaking name
-			// matching downstream. Fixed-width slicing is the fix.
-			name:     "comm with internal spaces — REGRESSION GUARD",
-			line:     "  489     1 Core Audio Drive Core Audio Driver (MSTeamsAudioDevice.driver)",
+			name:     "dynamic columns with no comm width dependency",
+			line:     "  489     1 /usr/sbin/coreaudiod Core Audio Driver (MSTeamsAudioDevice.driver)",
 			wantPID:  "489",
 			wantPPID: "1",
-			wantCmd:  "Core Audio Drive",
-			wantArgs: "Core Audio Driver (MSTeamsAudioDevice.driver)",
+			wantCmd:  "coreaudiod",
+			wantArgs: "/usr/sbin/coreaudiod Core Audio Driver (MSTeamsAudioDevice.driver)",
 		},
 		{
-			name:     "comm exactly fills the 16-char column",
-			line:     "  147     1 /System/Library/ /System/Library/PrivateFrameworks/X.framework/X",
-			wantPID:  "147",
-			wantPPID: "1",
-			wantCmd:  "/System/Library/",
-			wantArgs: "/System/Library/PrivateFrameworks/X.framework/X",
+			name:     "wide pid and ppid columns",
+			line:     "123456 98765 /opt/app/bin/renderer --headless",
+			wantPID:  "123456",
+			wantPPID: "98765",
+			wantCmd:  "renderer",
+			wantArgs: "/opt/app/bin/renderer --headless",
 		},
 		{
 			name:     "args preserves internal multi-space",
-			line:     "  456     1 claude           a  b   c",
+			line:     "  456     1 /usr/local/bin/claude a  b   c",
 			wantPID:  "456",
 			wantPPID: "1",
 			wantCmd:  "claude",
-			wantArgs: "a  b   c",
+			wantArgs: "/usr/local/bin/claude a  b   c",
 		},
 		{
-			// Real ps still pads comm to 16 chars even when args is
-			// effectively empty; the line ends right after the padding.
-			name:     "no args after padded comm",
-			line:     "  789     1 kernel_task     ",
+			name:     "outer args whitespace is normalized",
+			line:     "  789     1    /bin/zsh -l   ",
 			wantPID:  "789",
 			wantPPID: "1",
-			wantCmd:  "kernel_task",
-			wantArgs: "",
+			wantCmd:  "zsh",
+			wantArgs: "/bin/zsh -l",
 		},
 	}
 	for _, tc := range cases {
@@ -577,7 +567,7 @@ func TestParseProcessSnapshotLineDarwinRejectsMalformed(t *testing.T) {
 		{"whitespace only", "       "},
 		{"pid only", "  123"},
 		{"pid and ppid only", "  123     1"},
-		{"pid, ppid, separator, no comm", "  123     1 "},
+		{"pid, ppid, separator, no args", "  123     1 "},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -585,6 +575,60 @@ func TestParseProcessSnapshotLineDarwinRejectsMalformed(t *testing.T) {
 				t.Errorf("expected ok=false for %q", tc.line)
 			}
 		})
+	}
+}
+
+func TestParseDarwinProcessSnapshotPreservesCommWhenArgv0IsRewritten(t *testing.T) {
+	argsOut := strings.Join([]string{
+		"  101     1 /bin/zsh -l",
+		"  102   101 2.1.30 --print",
+	}, "\n")
+	commOut := strings.Join([]string{
+		"  101     1 zsh",
+		"  102   101 /usr/local/bin/claude",
+	}, "\n")
+
+	snapshot := parseDarwinProcessSnapshot(argsOut, commOut)
+	process, ok := snapshot.byPID["102"]
+	if !ok {
+		t.Fatal("process 102 missing from Darwin snapshot")
+	}
+	if process.Command != "/usr/local/bin/claude" {
+		t.Fatalf("Command = %q, want comm path", process.Command)
+	}
+	if process.Args != "2.1.30 --print" {
+		t.Fatalf("Args = %q, want rewritten argv[0] args", process.Args)
+	}
+	if !snapshot.processMatchesNames("102", processNameSet([]string{"claude"})) {
+		t.Fatal("processMatchesNames(102, claude) = false, want true from comm")
+	}
+}
+
+func TestParseDarwinProcessSnapshotTraversesThroughEmptyArgsRows(t *testing.T) {
+	argsOut := strings.Join([]string{
+		"  101     1 /bin/bash -l",
+		"  102   101 ",
+		"  103   102 /usr/local/bin/claude --print",
+	}, "\n")
+	commOut := strings.Join([]string{
+		"  101     1 bash",
+		"  102   101 launchd helper",
+		"  103   102 claude",
+	}, "\n")
+
+	snapshot := parseDarwinProcessSnapshot(argsOut, commOut)
+	process, ok := snapshot.byPID["102"]
+	if !ok {
+		t.Fatal("process 102 missing from Darwin snapshot")
+	}
+	if process.Command != "launchd helper" {
+		t.Fatalf("Command = %q, want comm for empty-args process", process.Command)
+	}
+	if process.Args != "" {
+		t.Fatalf("Args = %q, want empty args", process.Args)
+	}
+	if !snapshot.hasDescendantWithNames("101", processNameSet([]string{"claude"}), 0) {
+		t.Fatal("hasDescendantWithNames(101, claude) = false, want traversal through empty-args row")
 	}
 }
 
