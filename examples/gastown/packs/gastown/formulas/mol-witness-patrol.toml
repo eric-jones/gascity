@@ -185,9 +185,8 @@ a NEW session with a different ID — the old one never comes back.
      top-level values include booleans, so `$x.id` on them errors).
    - Session fields are lowercase snake_case: `id / name / session_name /
      alias / agent_name / state / closed`. Key the map on `id`, `name`,
-     `alias`, and `agent_name` — the forms an assignee actually takes.
-     NOT `session_name`: that is the `<rig>--<suffix>` form, which assignees
-     never use (they use `<rig>/<suffix>` = name/alias/agent_name).
+     `session_name`, `alias`, and `agent_name` — the exact identifier forms
+     an assignee may take.
 
    Stream both JSON blobs through temp files, never `--argjson` on argv: on a
    busy city the session `command` fields are large and overflow ARG_MAX
@@ -205,6 +204,7 @@ a NEW session with a different ID — the old one never comes back.
      (reduce ($sessions[0].sessions // [])[] as $s ({};
          add(.; $s.id;         $s.state; ($s.closed // false))
        | add(.; $s.name;       $s.state; ($s.closed // false))
+       | add(.; $s.session_name; $s.state; ($s.closed // false))
        | add(.; $s.alias;      $s.state; ($s.closed // false))
        | add(.; $s.agent_name; $s.state; ($s.closed // false))
      )) as $from_sessions
