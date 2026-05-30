@@ -2569,6 +2569,7 @@ export interface components {
              * @example https://example.com/errors/example
              * @example urn:gascity:error:sling-missing-bead
              * @example urn:gascity:error:sling-cross-rig
+             * @example urn:gascity:error:sling-cross-store-route
              */
             type: string;
         };

@@ -1971,13 +1971,15 @@
             "examples": [
               "https://example.com/errors/example",
               "urn:gascity:error:sling-missing-bead",
-              "urn:gascity:error:sling-cross-rig"
+              "urn:gascity:error:sling-cross-rig",
+              "urn:gascity:error:sling-cross-store-route"
             ],
             "format": "uri",
             "type": "string",
             "x-gascity-problem-types": [
               "urn:gascity:error:sling-missing-bead",
-              "urn:gascity:error:sling-cross-rig"
+              "urn:gascity:error:sling-cross-rig",
+              "urn:gascity:error:sling-cross-store-route"
             ]
           }
         },

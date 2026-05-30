@@ -625,18 +625,6 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if r.deps.Store == nil {
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
-	if r.deps.Cfg != nil {
-		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok {
-			if !agentReachesWorkflowStore(r.deps.StoreRef, &agentCfg, r.deps.CityPath, r.deps.Cfg) {
-				reachable := agentReachableStoreLabel(&agentCfg, r.deps.CityPath, r.deps.CityName, r.deps.Cfg)
-				return fmt.Errorf(
-					"gc sling: refusing cross-store route: bead %s lives in %s but target %q reads %s; "+
-						"re-file the bead in %s (or pick a target reachable from %s). "+
-						"Cross-store routes silently wedge pools — see tr-6s7yx",
-					req.BeadID, r.deps.StoreRef, req.Target, reachable, reachable, r.deps.StoreRef)
-			}
-		}
-	}
 	routedTo := req.Target
 	if r.deps.Cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)

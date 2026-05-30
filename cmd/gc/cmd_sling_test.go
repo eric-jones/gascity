@@ -638,7 +638,7 @@ func TestDoSlingBeadToPool(t *testing.T) {
 	}
 }
 
-func TestCliBeadRouterRefusesCrossStoreRoute(t *testing.T) {
+func TestDoSlingRefusesCrossStoreRoute(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "alpha")
 	cfg := &config.City{
@@ -654,23 +654,18 @@ func TestCliBeadRouterRefusesCrossStoreRoute(t *testing.T) {
 	if _, err := store.Create(beads.Bead{ID: "HQ-1", Type: "task", Status: "open"}); err != nil {
 		t.Fatalf("seed HQ-1: %v", err)
 	}
-	deps := &slingDeps{
-		CityName: "test-city",
-		CityPath: cityPath,
-		Cfg:      cfg,
-		Store:    store,
-		StoreRef: "city:test-city",
-	}
-	router := cliBeadRouter{deps: deps}
+	runner := newFakeRunner()
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.CityPath = cityPath
+	deps.Store = store
+	deps.StoreRef = "city:test-city"
+	opts := testOpts(cfg.Agents[0], "HQ-1")
+	opts.Force = true
 
-	err := router.Route(context.Background(), sling.RouteRequest{
-		BeadID: "HQ-1",
-		Target: "alpha/polecat",
-	})
-	if err == nil {
-		t.Fatal("expected cross-store route to be refused, got nil error")
+	if code := doSling(opts, deps, &fakeQuerier{bead: beads.Bead{ID: "HQ-1", Type: "task", Status: "open"}}, stdout, stderr); code == 0 {
+		t.Fatalf("doSling returned 0, want cross-store refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
-	msg := err.Error()
+	msg := stderr.String()
 	for _, want := range []string{"refusing cross-store route", "city:test-city", "rig:alpha", "alpha/polecat", "tr-6s7yx"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("error message missing %q: %s", want, msg)
@@ -1290,6 +1285,7 @@ func TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo(t *testing.T) {
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
 	store := newSlingTestStore()
 	deps.Store = store
+	deps.StoreRef = "rig:saitoc"
 
 	created, err := store.Create(beads.Bead{Title: "slot-routed work", Type: "task"})
 	if err != nil {
@@ -1316,6 +1312,50 @@ func TestBuiltInSlingSlotSuffixedTargetNormalizesRoutedTo(t *testing.T) {
 	}
 	if got := routed.Metadata["gc.routed_to"]; got != "saitoc/polecat" {
 		t.Fatalf("gc.routed_to = %q, want saitoc/polecat (slot suffix should be normalized away)", got)
+	}
+}
+
+func TestBuiltInSlingSlotSuffixedTargetRefusesCrossStoreRoute(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	maxPolecats := 5
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "saitoc", Path: "/tmp/saitoc", Prefix: "gc"}},
+		Agents: []config.Agent{
+			{Name: "polecat", Dir: "saitoc", MaxActiveSessions: &maxPolecats},
+		},
+	}
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	store := newSlingTestStore()
+	deps.Store = store
+	deps.StoreRef = "city:test-city"
+
+	created, err := store.Create(beads.Bead{Title: "slot-routed work", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	target, ok := resolveAgentIdentity(cfg, "saitoc/polecat-2", "")
+	if !ok {
+		t.Fatal("resolveAgentIdentity(saitoc/polecat-2) failed")
+	}
+
+	opts := testOpts(target, created.ID)
+	code := doSling(opts, deps, &fakeQuerier{bead: created}, stdout, stderr)
+	if code == 0 {
+		t.Fatalf("doSling returned 0, want cross-store refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "refusing cross-store route") ||
+		!strings.Contains(got, "city:test-city") ||
+		!strings.Contains(got, "rig:saitoc") {
+		t.Fatalf("stderr = %q, want cross-store refusal with city and rig stores", got)
+	}
+	routed, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get routed bead: %v", err)
+	}
+	if got := routed.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want unset after refusal", got)
 	}
 }
 
@@ -6974,6 +7014,7 @@ func TestDoSlingCrossRigForceOverrides(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hello-world"}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-123")
 	opts.Force = true
 	code := doSling(opts, deps, nil, stdout, stderr)
@@ -7000,6 +7041,7 @@ func TestDoSlingCrossRigSameRigAllowed(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hello-world"}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "HW-7")
 	code := doSling(opts, deps, nil, stdout, stderr)
 
@@ -7129,6 +7171,7 @@ func TestDoSlingCrossRigFormulaExempt(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hello-world"}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "code-review")
 	opts.IsFormula = true
 	// Formula mode — cross-rig check should not apply.
@@ -7210,6 +7253,7 @@ func TestDoSlingOnFormulaCrossRigForceOverrides(t *testing.T) {
 	a := config.Agent{Name: "polecat", Dir: "hello-world"}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps.StoreRef = "rig:hello-world"
 	opts := testOpts(a, "FE-123")
 	opts.OnFormula = "code-review"
 	opts.Force = true
