@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"runtime/debug"
 	"strings"
@@ -617,6 +618,24 @@ func pendingResumePreservingNamedRestart(session beads.Bead, clk clock.Clock, st
 		return false
 	}
 	return true
+}
+
+func wakeDemandOverridesSleepSuppression(
+	decision AwakeDecision,
+	eval wakeEvaluation,
+	policy resolvedSessionSleepPolicy,
+	poolDesired map[string]int,
+	template string,
+	hasExplicitSleepIntent bool,
+) bool {
+	if hasExplicitSleepIntent {
+		return false
+	}
+	hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
+	if hasDemand && policy.Class == config.SessionSleepNonInteractive {
+		return true
+	}
+	return decision.Reason == "min-active" && containsWakeReason(eval.Reasons, WakeConfig)
 }
 
 // reconcileSessionBeads performs bead-driven reconciliation using wake/sleep
@@ -2026,15 +2045,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		if decision.ShouldWake && !pendingInteractionReady(sp, name) && target.session.Metadata["pin_awake"] != "true" && configWakeSuppressed(*target.session, policy, sp, clk) {
 			// Active demand (poolDesired > 0 or direct assigned work)
 			// overrides sleep suppression for non-interactive sessions
-			// (matching the old evaluateWakeReasons behavior). Interactive
-			// sessions honor their idle window regardless of demand — an
-			// idle chat session should still sleep to release resources.
+			// (matching the old evaluateWakeReasons behavior). Min-active
+			// city-stop revival is also config demand: stale detach metadata
+			// from before gc stop must not cancel the post-start guarantee.
+			// Other interactive sessions honor their idle window regardless
+			// of demand — an idle chat session should still sleep to release
+			// resources.
 			// Explicit sleep_intent always wins — if the session has
 			// signaled it wants to sleep, honor that regardless of demand.
 			template := normalizedSessionTemplate(*target.session, cfg)
-			hasDemand := poolDesired[template] > 0 || eval.HasAssignedWork
 			hasExplicitSleepIntent := target.session.Metadata["sleep_intent"] != ""
-			demandOverrides := hasDemand && policy.Class == config.SessionSleepNonInteractive && !hasExplicitSleepIntent
+			demandOverrides := wakeDemandOverridesSleepSuppression(decision, eval, policy, poolDesired, template, hasExplicitSleepIntent)
 			if !demandOverrides {
 				eval.ConfigSuppressed = true
 				eval.Reasons = nil // Clear reasons so Phase 2 does not cancel the drain.
@@ -2514,10 +2535,15 @@ func emitSessionStrandedDiagnostic(
 	if strings.TrimSpace(session.Metadata[strandedEventEmittedKey]) != "" {
 		return
 	}
-	ids, err := collectSessionAssignedWorkIDs(cityPath, cfg, store, rigStores, *session)
+	assignedWork, err := collectSessionAssignedWork(cityPath, cfg, store, rigStores, *session)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: collecting stranded work ids for %s: %v\n", session.Metadata["session_name"], err) //nolint:errcheck
 	}
+	diagnosticWork := filterDetachedStrandedDiagnosticWork(assignedWork)
+	if err == nil && len(assignedWork) > 0 && len(diagnosticWork) == 0 {
+		return
+	}
+	ids := strandedAssignedWorkIDs(diagnosticWork)
 	now := clk.Now().UTC()
 	rec.Record(events.Event{
 		Type:    events.SessionStranded,
@@ -2533,6 +2559,39 @@ func emitSessionStrandedDiagnostic(
 	if err := store.SetMetadata(session.ID, strandedEventEmittedKey, now.Format(time.RFC3339)); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: stamping stranded throttle marker on %s: %v\n", session.ID, err) //nolint:errcheck
 	}
+}
+
+type strandedAssignedWork struct {
+	bead  beads.Bead
+	store beads.Store
+}
+
+func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
+	if len(work) == 0 {
+		return work
+	}
+	out := make([]strandedAssignedWork, 0, len(work))
+	for _, item := range work {
+		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
+		if spec == "" {
+			out = append(out, item)
+			continue
+		}
+		result := probeDetachedWork(context.Background(), spec)
+		switch result.Status {
+		case detachedProbeAlive:
+			log.Printf("session reconciler: suppressing session.stranded for %s: detached probe alive: %s", item.bead.ID, spec)
+			continue
+		case detachedProbeDead:
+			log.Printf("session reconciler: clearing dead detached probe for %s before session.stranded: %s", item.bead.ID, spec)
+			clearDetachedProbeMetadata(item.store, item.bead.ID)
+			out = append(out, item)
+		default:
+			log.Printf("session reconciler: preserving session.stranded for %s after detached probe %s: %v", item.bead.ID, result.Status, result.Err)
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // formatStrandedMessage builds the diagnostic message body for a
@@ -2556,21 +2615,22 @@ func formatStrandedMessage(template, sessionName string, ids []string) string {
 		prefix, len(ids), strings.Join(shown, ","), suffix)
 }
 
-// collectSessionAssignedWorkIDs returns the IDs of open/in_progress
-// work beads assigned to the session, excluding session beads
-// themselves. Mirrors the identifier resolution and store routing of
-// sessionHasOpenAssignedWorkForReachableStore so the diagnostic message
-// lists exactly the beads the gate considered when deciding to emit.
+// collectSessionAssignedWork returns the open/in_progress work beads
+// assigned to the session, excluding session beads themselves, along
+// with the store that owns each work bead. Mirrors the identifier
+// resolution and store routing of sessionHasOpenAssignedWorkForReachableStore
+// so the diagnostic path lists and mutates exactly the beads the gate
+// considered when deciding to emit.
 //
 // Without this alignment the gate could see assigned work (via the
 // config-derived named-session identity, or via a rig-store-routed
 // query) while the collector queried only the bare bead identifiers
 // against every store — producing a "0 stranded beads" message in the
 // exact failure mode the diagnostic exists to surface.
-func collectSessionAssignedWorkIDs(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]string, error) {
+func collectSessionAssignedWork(cityPath string, cfg *config.City, store beads.Store, rigStores map[string]beads.Store, session beads.Bead) ([]strandedAssignedWork, error) {
 	identifiers := sessionAssignmentIdentifiersForConfig(session, cfg)
 	seen := make(map[string]struct{})
-	out := make([]string, 0, 4)
+	out := make([]strandedAssignedWork, 0, 4)
 	collect := func(s beads.Store) error {
 		if s == nil {
 			return nil
@@ -2592,7 +2652,7 @@ func collectSessionAssignedWorkIDs(cityPath string, cfg *config.City, store bead
 						continue
 					}
 					seen[item.ID] = struct{}{}
-					out = append(out, item.ID)
+					out = append(out, strandedAssignedWork{bead: item, store: s})
 				}
 			}
 		}
@@ -2628,6 +2688,14 @@ func collectSessionAssignedWorkIDs(cityPath string, cfg *config.City, store bead
 		}
 	}
 	return out, nil
+}
+
+func strandedAssignedWorkIDs(work []strandedAssignedWork) []string {
+	ids := make([]string, 0, len(work))
+	for _, item := range work {
+		ids = append(ids, item.bead.ID)
+	}
+	return ids
 }
 
 func sessionHasOpenAssignedWorkInStore(store beads.Store, session beads.Bead) (bool, error) {

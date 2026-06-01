@@ -119,6 +119,18 @@ func TestConfigFingerprintIncludesAcceptStartupDialogs(t *testing.T) {
 	}
 }
 
+func TestConfigFingerprintIncludesMouseOn(t *testing.T) {
+	off := Config{Command: "claude"}
+	on := Config{Command: "claude", MouseOn: true}
+
+	if CoreFingerprint(off) == CoreFingerprint(on) {
+		t.Fatal("MouseOn should affect core fingerprint")
+	}
+	if got := CoreFingerprintDriftFields(CoreFingerprintBreakdown(off), on); len(got) != 1 || got[0] != "MouseOn" {
+		t.Fatalf("CoreFingerprintDriftFields = %v, want [MouseOn]", got)
+	}
+}
+
 func TestConfigFingerprintIncludesLifecycle(t *testing.T) {
 	persistent := Config{Command: "custom-once"}
 	oneShot := Config{Command: "custom-once", Lifecycle: LifecycleOneShot}
@@ -885,6 +897,7 @@ func TestClassifyCoreField(t *testing.T) {
 		{"SessionSetupScript", FieldClassRestartRequired},
 		{"OverlayProviders", FieldClassRestartRequired},
 		{"AcceptStartupDialogs", FieldClassRestartRequired},
+		{"MouseOn", FieldClassRestartRequired},
 		// Unknown name fails safe to restart-required.
 		{"Bogus", FieldClassRestartRequired},
 	}
@@ -904,7 +917,7 @@ func TestClassifyCoreField(t *testing.T) {
 		"Command": true, "Lifecycle": true, "Env": true, "MCPServers": true,
 		"FPExtra": true, "Skills": true, "PreStart": true, "SessionSetup": true,
 		"SessionSetupScript": true, "OverlayDir": true, "OverlayProviders": true,
-		"AcceptStartupDialogs": true, "CopyFiles": true,
+		"AcceptStartupDialogs": true, "CopyFiles": true, "MouseOn": true,
 	}
 	bd := CoreFingerprintBreakdown(Config{Command: "claude"})
 	if len(bd.Fields) == 0 {

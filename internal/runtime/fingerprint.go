@@ -53,7 +53,7 @@ const FingerprintVersion = "v3"
 //
 // Included: Command, Lifecycle, Env, FingerprintExtra (pool config, etc.),
 // PreStart, SessionSetup, SessionSetupScript, OverlayDir, effective provider
-// overlay slots, CopyFiles, AcceptStartupDialogs, SessionLive.
+// overlay slots, CopyFiles, AcceptStartupDialogs, MouseOn, SessionLive.
 //
 // Excluded (observation-only hints): WorkDir, ReadyPromptPrefix,
 // ReadyDelayMs, ProcessNames, EmitsPermissionWarning.
@@ -244,6 +244,7 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 
 	hashOverlayProviders(h, OverlayProviderNames(cfg))
 	hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
+	hashBool(h, "mouse_on", cfg.MouseOn)
 
 	// CopyFiles — probed entries use ContentHash (stable when content
 	// unchanged, even if files are recreated). Config-derived entries
@@ -276,6 +277,17 @@ func hashOptionalBool(h hash.Hash, name string, value *bool) {
 	h.Write([]byte(name)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
 	if *value {
+		h.Write([]byte("true")) //nolint:errcheck // hash.Write never errors
+	} else {
+		h.Write([]byte("false")) //nolint:errcheck // hash.Write never errors
+	}
+	h.Write([]byte{0}) //nolint:errcheck // hash.Write never errors
+}
+
+func hashBool(h hash.Hash, name string, value bool) {
+	h.Write([]byte(name)) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
+	if value {
 		h.Write([]byte("true")) //nolint:errcheck // hash.Write never errors
 	} else {
 		h.Write([]byte("false")) //nolint:errcheck // hash.Write never errors
@@ -446,6 +458,9 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		}),
 		"AcceptStartupDialogs": fieldHash(func(h hash.Hash) {
 			hashOptionalBool(h, "accept_startup_dialogs", cfg.AcceptStartupDialogs)
+		}),
+		"MouseOn": fieldHash(func(h hash.Hash) {
+			hashBool(h, "mouse_on", cfg.MouseOn)
 		}),
 		"CopyFiles": fieldHash(func(h hash.Hash) {
 			for _, cf := range cfg.CopyFiles {
