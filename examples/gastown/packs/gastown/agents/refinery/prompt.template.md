@@ -228,13 +228,29 @@ Never infer a branch name. If `metadata.branch` is missing, reject the bead.
 
 ## Rejection Flow
 
-On rebase conflict or test failure:
-1. Put work bead back in pool:
-   `gc bd update $WORK --status=open --assignee="" --set-metadata rejection_reason="..."`
-2. Branch handling depends on failure type:
-   - Conflict: leave branch intact (polecat needs it for rebase)
-   - Test failure: delete branch (polecat redoes work)
-3. Pour next wisp, burn current one
+On rebase conflict or test failure, follow `mol-refinery-patrol`'s
+rebase / handle-failures step verbatim. Do not compose your own
+shorter version of the bd update — the full update is required,
+including `gc.routed_to`:
+
+```bash
+gc bd update $WORK \
+  --status=open \
+  --assignee="" \
+  --set-metadata rejection_reason="..." \
+  --set-metadata gc.routed_to="${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat"
+```
+
+`gc.routed_to=...polecat` is load-bearing: the pool reconciler matches
+on `gc.routed_to`, not `rejection_reason`, so a rejected bead with the
+old `gc.routed_to=...refinery` value (set when the polecat first
+submitted) sits in the queue forever — no polecat is ever spawned.
+
+Branch handling depends on failure type:
+- Conflict: leave branch intact (polecat needs it for rebase)
+- Test failure: delete branch (polecat redoes work)
+
+Then pour the next wisp and burn the current one.
 
 A new polecat picks up the bead, sees `metadata.branch` and
 `metadata.rejection_reason`, rebases or redoes work, reassigns to refinery.
