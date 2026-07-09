@@ -275,6 +275,34 @@ If `metadata.existing_pr` is present while `merge_strategy` is unset or
 `direct`, treat the handoff as `mr`. An existing PR cannot be validated
 and then ignored by landing directly to the target branch.
 
+## Merge Bookkeeping
+
+Two non-negotiable obligations on every merge, regardless of merge
+strategy, remote presence, or merge shape (fast-forward / merge
+commit):
+
+- **`merged_sha` and `merged_target` MUST be written via
+  `gc bd update --set-metadata` BEFORE `gc bd close`.** They are the
+  only forensic breadcrumbs tying a closed bead to its merge commit on
+  `$TARGET`. Skipping the metadata write — even on a rig with no
+  remote, even when `gc bd close --reason` already names the SHA in
+  prose — leaves downstream tools with no way to verify the bead
+  actually merged. The formula chains both writes with `&&`; do not
+  split them, and do not skip the metadata write because the close
+  reason looks redundant.
+
+- **Use `git update-ref refs/heads/$TARGET <sha>` to advance the
+  target branch.** The formula's `merge-push` step uses this instead
+  of `git checkout $TARGET; git merge --ff-only temp` for a reason:
+  checking out a branch that another worktree has open silently
+  merges into the wrong worktree's HEAD instead of `$TARGET`. Follow
+  the formula's command shape verbatim — do not substitute a simpler
+  `git merge --ff-only` even when it looks equivalent.
+
+If `git push` is impossible (no remote, push-disabled rig), still run
+the metadata write and the close. The local merge happened; the bead
+records that merge.
+
 ---
 
 ## Communication
