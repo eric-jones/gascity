@@ -355,14 +355,7 @@ fi
 git push origin HEAD
 ```
 
-**4. Clean up local branch (prevent stale branch accumulation):**
-```bash
-BRANCH=$(git branch --show-current)
-git checkout --detach                 # Detach so we can delete the branch
-git branch -D "$BRANCH"              # Branch is pushed; refinery owns it now
-```
-
-**5. Update metadata on the work bead:**
+**4. Update metadata on the work bead:**
 ```bash
 gc bd update {{issue}} \
   --set-metadata target={{base_branch}} \
@@ -374,7 +367,7 @@ provided by the caller, `metadata.existing_pr` is preserved for refinery
 validation. The refinery records canonical `pr_url` only after verifying
 the PR is open and matches the branch, base, and origin repository.
 
-**6. Reassign to refinery:**
+**5. Reassign to refinery:**
 ```bash
 REFINERY_TARGET="${GC_RIG:+$GC_RIG/}{{binding_prefix}}refinery"
 gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""
@@ -394,7 +387,32 @@ named-session work should not retain pool-demand metadata.
 The refinery will pick this up, rebase onto {{base_branch}}, run tests,
 merge, and close the bead. If there's a conflict, the refinery puts the
 bead back in the pool with `rejection_reason` metadata — a new polecat
-picks it up and resumes from the existing branch.
+picks it up from the bead's `metadata.work_dir` (or creates a fresh
+worktree if step 6 below already removed it — workspace-setup handles
+both cases).
+
+**6. Release the pool slot — delete the local branch and remove the worktree:**
+```bash
+WORKTREE_PATH=$(pwd)
+BRANCH=$(git branch --show-current)
+cd "$GC_RIG_ROOT"
+[ -n "$BRANCH" ] && git branch -D "$BRANCH" 2>/dev/null   # branch is pushed; refinery owns it now
+git worktree remove --force "$WORKTREE_PATH" 2>/dev/null || true
+```
+
+Pool slots are bounded. A stale per-polecat branch and worktree pinned
+to a dead bead is counted as "occupied" by the reconciler — the next
+sling routed to this rig either reuses a stale workspace (subtle) or
+never gets a polecat at all (visible). Run cleanup BEFORE drain-ack so
+the session is still alive while git operations execute. Skipping this
+step (or running it inside the worktree, where `git worktree remove`
+refuses to delete the cwd) reproduces the fan-out stuck-slot symptom.
+
+The `cd "$GC_RIG_ROOT"` matters: `git worktree remove` cannot remove
+the worktree the agent is currently sitting in, and `$GC_RIG_ROOT` is
+the canonical rig checkout (the only worktree guaranteed to exist after
+this cleanup). Subsequent `gc bd` and `gc runtime` commands are
+path-agnostic; they read scope from env vars, not cwd.
 
 **7. Signal refinery to check for work immediately (belt-and-suspenders):**
 ```bash
@@ -403,7 +421,7 @@ gc session wake "$REFINERY_TARGET" || true
 gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true
 ```
 
-The `gc bd update` in step 6 generates a `bead.updated` event the refinery's
+The `gc bd update` in step 5 generates a `bead.updated` event the refinery's
 event-watch will see, but that can take up to `event_timeout` seconds. Wake
 starts a stopped on_demand session; nudge leaves a visible prompt for a running
 one as soon as it is ready for input. Failure is non-fatal: the refinery finds
@@ -419,4 +437,6 @@ exit
 reconciler only restarts you if the pool check command finds more work.
 You are GONE. Done means gone. There is no idle state.
 
-**Exit criteria:** Branch pushed, metadata set, bead reassigned, refinery signaled, drain acknowledged, session exited."""
+**Exit criteria:** Branch pushed, metadata set, bead reassigned, local
+branch and worktree removed, refinery signaled, drain acknowledged,
+session exited."""

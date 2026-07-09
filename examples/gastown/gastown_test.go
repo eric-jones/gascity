@@ -535,7 +535,7 @@ func TestPolecatFormulaSignalsRefineryAfterReassign(t *testing.T) {
 	nudge := `gc session nudge "$REFINERY_TARGET" "Run 'gc prime' to check merge queue and begin processing." || true`
 
 	assertContainsInOrder(t, body,
-		"**6. Reassign to refinery:**",
+		"**5. Reassign to refinery:**",
 		refineryTarget,
 		`gc bd update {{issue}} --status=open --assignee="$REFINERY_TARGET" --set-metadata gc.routed_to=""`,
 		"**7. Signal refinery to check for work immediately",
@@ -589,7 +589,7 @@ func TestPolecatFormulaSubmitHasBranchShapeGate(t *testing.T) {
 		`exit 1`,
 		"**2. Final clean-state verification (safeguard):**",
 		"**3. Push your branch:**",
-		"**6. Reassign to refinery:**",
+		"**5. Reassign to refinery:**",
 	)
 
 	// The metadata.branch reconciliation must also be present so a
@@ -791,6 +791,77 @@ func TestPolecatFormulaHaltsOnAutoPushFalse(t *testing.T) {
 		"fi",
 		"git push origin HEAD",
 	)
+}
+
+// TestPolecatReleasesPoolSlotOnSubmit guards against the regression
+// where the polecat agent's done sequence left its branch and worktree
+// behind. Pool slots are bounded; a stale per-polecat worktree pinned
+// to a dead branch is counted as occupied by the reconciler — under
+// fan-out the next sling either reuses a stale workspace or never
+// spawns a polecat at all (the L5b "3rd fan-out child stuck
+// unassigned" symptom).
+//
+// The fix lives in two places that must stay in sync:
+//
+//  1. The polecat prompt template's FINAL REMINDER done sequence —
+//     this is what the agent actually follows; the formula's step
+//     descriptions are read only when the agent re-pours from the
+//     wisp, which is not the common path.
+//  2. The mol-polecat-work formula's submit-and-exit step — kept in
+//     sync with the prompt template so anyone reading the formula
+//     directly gets the same instruction.
+//
+// Both must `cd "$GC_RIG_ROOT"` before `git worktree remove`, since
+// you can't remove the worktree the agent is currently sitting in,
+// and `$GC_RIG_ROOT` is the canonical rig checkout that gascity sets
+// in the polecat session env.
+func TestPolecatReleasesPoolSlotOnSubmit(t *testing.T) {
+	dir := exampleDir()
+
+	promptPath := filepath.Join(dir, "packs", "gastown", "agents", "polecat", "prompt.template.md")
+	promptData, err := os.ReadFile(promptPath)
+	if err != nil {
+		t.Fatalf("reading polecat prompt: %v", err)
+	}
+	prompt := string(promptData)
+
+	// Prompt's done sequence must capture the worktree path BEFORE
+	// cd-ing out, then delete the local branch and remove the worktree
+	// while running from $GC_RIG_ROOT.
+	assertContainsInOrder(t, prompt,
+		`gc bd update <work-bead> --status=open --assignee="$REFINERY_TARGET"`,
+		`WORKTREE_PATH=$(pwd)`,
+		`BRANCH=$(git branch --show-current)`,
+		`cd "$GC_RIG_ROOT"`,
+		`git branch -D "$BRANCH"`,
+		`git worktree remove --force "$WORKTREE_PATH"`,
+		`gc runtime drain-ack`,
+	)
+
+	formulaPath := filepath.Join(dir, "packs", "gastown", "formulas", "mol-polecat-work.toml")
+	formulaData, err := os.ReadFile(formulaPath)
+	if err != nil {
+		t.Fatalf("reading polecat formula: %v", err)
+	}
+	formula := string(formulaData)
+
+	// Same chained shape in the formula's submit-and-exit step.
+	assertContainsInOrder(t, formula,
+		`Reassign to refinery`,
+		`WORKTREE_PATH=$(pwd)`,
+		`cd "$GC_RIG_ROOT"`,
+		`git branch -D "$BRANCH"`,
+		`git worktree remove --force "$WORKTREE_PATH"`,
+		`gc runtime drain-ack`,
+	)
+
+	// Guard against the prior shape where cleanup happened inside the
+	// worktree (`git checkout --detach && git branch -D`) without
+	// removing the worktree itself — that's the bug this test exists
+	// to prevent recurring.
+	if strings.Contains(formula, "git checkout --detach") {
+		t.Fatalf("polecat formula still uses `git checkout --detach` cleanup shape; switch to `cd \"$GC_RIG_ROOT\" && git worktree remove --force` so the pool slot is fully released")
+	}
 }
 
 func TestRefineryFormulaRespectsExistingPRMetadata(t *testing.T) {
